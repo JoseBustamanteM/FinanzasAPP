@@ -279,6 +279,20 @@ function confirmar(titulo, texto, si = 'Sí', peligro = false) {
   });
 }
 
+function qrSrc(qr) {
+  // Supabase entrega el QR como SVG en un data: URI sin codificar (los "#" lo rompen en <img>).
+  // Se convierte a un blob local, que el navegador muestra sin problemas.
+  let svg = qr || '';
+  if (svg.startsWith('data:')) {
+    const i = svg.indexOf(','); const meta = svg.slice(0, i); svg = svg.slice(i + 1);
+    if (/;base64/i.test(meta)) { try { svg = atob(svg); } catch (e) { } }
+    else if (/%[0-9a-f]{2}/i.test(svg)) { try { svg = decodeURIComponent(svg); } catch (e) { } }
+  }
+  if (!svg.trim().startsWith('<')) return qr;
+  if (!/xmlns=/.test(svg)) svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  return URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+}
+
 // ---------- Pantallas
 function render() { if (S.screen === 'main') renderMain(); else renderAuth(); }
 
@@ -304,7 +318,7 @@ function renderAuth() {
     <p class="mut small">Es obligatoria y se hace una sola vez. Necesitas una app de autenticación en tu celular: <b>Google Authenticator</b>, <b>Microsoft Authenticator</b> o similar.</p>
     <div class="card" style="text-align:center">
       <p class="small"><b>Si estás en un computador:</b> escanea este código con la app.</p>
-      <img src="${esc(S.mfa.qr)}" alt="Código QR" width="190" height="190" style="background:#fff;border-radius:12px;padding:8px">
+      <img src="${esc(S.mfa.qrUrl || (S.mfa.qrUrl = qrSrc(S.mfa.qr)))}" alt="Código QR" width="190" height="190" style="background:#fff;border-radius:12px;padding:8px">
       <p class="small" style="margin-top:12px"><b>Si estás en el mismo celular:</b></p>
       <a class="btn sec" href="${esc(S.mfa.uri)}">Abrir en mi app de autenticación</a>
       <p class="mut small">o copia esta clave y agrégala a mano:</p>

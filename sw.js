@@ -1,6 +1,6 @@
 // Service worker: guarda la app en el teléfono para que funcione sin internet.
 // Nunca toca tus datos (esos viven cifrados en IndexedDB).
-const CACHE = 'finanzas-v3';
+const CACHE = 'finanzas-v4';
 const ASSETS = ['./', './index.html', './app.js', './config.js', './styles.css',
   './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
