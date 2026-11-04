@@ -16,7 +16,7 @@ const ICON = { gasto: '🧾', ingreso: '💰', transferencia: '↗️', pago_tar
 const CAT_ICON = { Bencina: '⛽', Comida: '🍔', Supermercado: '🛒', Transporte: '🚌', Hogar: '🏠', Cuentas: '📄',
   Salud: '💊', Entretención: '🎬', Compras: '🛍️', Mascotas: '🐾', Educación: '📚', Sueldo: '💰' };
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
-const TABS = { inicio: ['🏠', 'Inicio'], movimientos: ['📋', 'Movimientos'], atajos: ['⚡', 'Atajos'], ajustes: ['⚙️', 'Ajustes'] };
+const TABS = { inicio: ['🏠', 'Inicio'], movimientos: ['📋', 'Movimientos'], pagos: ['📅', 'Pagos'], atajos: ['⚡', 'Atajos'], ajustes: ['⚙️', 'Ajustes'] };
 
 // ---------- utilidades
 const $ = (s, el = document) => el.querySelector(s);
@@ -83,6 +83,60 @@ async function delRec(id) {
 const movs = () => [...S.items.values()].filter(x => x.kind === 'mov');
 const tpls = () => [...S.items.values()].filter(x => x.kind === 'tpl').sort((a, b) => (b.usos || 0) - (a.usos || 0) || a.nombre.localeCompare(b.nombre));
 const delMes = m => movs().filter(x => (x.fecha || '').startsWith(m));
+
+// ---------- Tarjetas de crédito de cada persona
+const tarjetas = () => [...S.items.values()].filter(x => x.kind === 'tar').sort((a, b) => a.nombre.localeCompare(b.nombre));
+const nombreTarjeta = id => { const t = id && S.items.get(id); return t && t.kind === 'tar' ? t.nombre : ''; };
+// Sin tarjeta, o con una que ya se eliminó, cuenta como "sin asignar" (clave '')
+const claveTarjeta = x => (nombreTarjeta(x.tarjetaId) ? x.tarjetaId : '');
+const esCredito = x => x.tipo === 'gasto' && x.medio === 'credito';
+// Sin argumento: deuda total. Con una clave: deuda de esa tarjeta.
+function deudaTarjeta(clave) {
+  const de = x => clave === undefined || claveTarjeta(x) === clave, all = movs().filter(de);
+  return sum(all.filter(esCredito)) - sum(all.filter(x => x.tipo === 'pago_tarjeta'));
+}
+function detalleTarjetas(m) {
+  const ms = delMes(m);
+  const fila = (clave, nombre) => {
+    const de = ms.filter(x => claveTarjeta(x) === clave);
+    return { nombre, compras: sum(de.filter(esCredito)), pagado: sum(de.filter(x => x.tipo === 'pago_tarjeta')), deuda: deudaTarjeta(clave) };
+  };
+  const out = tarjetas().map(t => fila(t.id, t.nombre));
+  const sin = fila('', 'Sin tarjeta asignada');
+  if (sin.compras || sin.pagado || sin.deuda) out.push(sin);
+  return out;
+}
+async function resolverTarjeta(f, tipo) {
+  const medio = f.querySelector('input[name=medio]:checked')?.value;
+  if (tipo !== 'pago_tarjeta' && !(tipo === 'gasto' && medio === 'credito')) return undefined;
+  const v = f.elements.tarjetaId?.value;
+  if (v !== '__nueva') return v || undefined;
+  const nombre = (f.elements.tarjetaNueva?.value || '').trim();
+  if (!nombre) throw new Error('Escribe el nombre de la tarjeta');
+  const igual = tarjetas().find(t => t.nombre.toLowerCase() === nombre.toLowerCase());
+  return igual ? igual.id : (await saveRec({ kind: 'tar', nombre })).id;
+}
+
+// ---------- Pagos mensuales: cada pago se marca por mes y genera un movimiento normal
+const pagos = () => [...S.items.values()].filter(x => x.kind === 'pag').sort((a, b) => a.dia - b.dia || a.nombre.localeCompare(b.nombre));
+const pagoMov = (p, m) => movs().find(x => x.pagoId === p.id && x.pagoMes === m);
+function vencimiento(p, m) {
+  const [y, mo] = m.split('-').map(Number);
+  return `${m}-${String(Math.min(p.dia, new Date(y, mo, 0).getDate())).padStart(2, '0')}`;
+}
+function resumenPagos(m) {
+  const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || (x.p.desde || '') <= m);
+  const pend = lista.filter(x => !x.mov);
+  return { lista, pend, porPagar: sum(pend.map(x => x.p)), variables: pend.filter(x => !x.p.monto).length, pagado: sum(lista.filter(x => x.mov).map(x => x.mov)) };
+}
+function estadoPago(p, m, mov) {
+  if (mov) return ['ok', `Pagado el ${+mov.fecha.slice(8, 10)}/${+mov.fecha.slice(5, 7)}`];
+  const v = vencimiento(p, m), h = hoy(), dia = +v.slice(8, 10);
+  if (v < h) return ['bad', `Atrasado · venció el ${dia}/${+v.slice(5, 7)}`];
+  if (v === h) return ['warn', 'Vence hoy'];
+  const n = Math.round((new Date(v + 'T12:00:00') - new Date(h + 'T12:00:00')) / 864e5);
+  return n <= 3 ? ['warn', `Vence en ${n} día${n === 1 ? '' : 's'}`] : ['mut', `Vence el ${dia}/${+v.slice(5, 7)}`];
+}
 
 // ---------- Supabase Auth + REST (sin librerías externas)
 class AuthError extends Error { constructor(m, status) { super(m); this.status = status; } }
@@ -249,7 +303,7 @@ async function importar(file) {
   if (j.app !== 'mis-finanzas' || j.v !== 2 || !Array.isArray(j.items)) throw new Error('El archivo no es un respaldo válido');
   let n = 0;
   for (const o of j.items) {
-    if (!o || !o.id || !['mov', 'tpl'].includes(o.kind)) continue;
+    if (!o || !o.id || !['mov', 'tpl', 'pag', 'tar'].includes(o.kind)) continue;
     const cur = S.items.get(o.id);
     if (cur && (cur.mod || 0) >= (o.mod || 0)) continue;
     await saveRaw(o); n++;
@@ -333,7 +387,7 @@ function renderAuth() {
 }
 
 function renderMain() {
-  const conMes = S.view === 'inicio' || S.view === 'movimientos';
+  const conMes = S.view === 'inicio' || S.view === 'movimientos' || S.view === 'pagos';
   app.innerHTML = `
     ${conMes ? `<header class="top"><button class="icon" data-act="mes" data-d="-1" aria-label="Mes anterior">‹</button>
       <div class="mes">${mesLabel(S.mes)}</div><button class="icon" data-act="mes" data-d="1" aria-label="Mes siguiente">›</button></header>`
@@ -362,8 +416,8 @@ const VIEWS = {
       transf = ms.filter(x => x.tipo === 'transferencia'), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
-    const all = movs();
-    const deuda = sum(all.filter(x => x.tipo === 'gasto' && x.medio === 'credito')) - sum(all.filter(x => x.tipo === 'pago_tarjeta'));
+    const deuda = deudaTarjeta();
+    const rp = resumenPagos(S.mes);
     const bal = I - G - T;
     const ben = gastos.filter(x => isBencina(x.categoria));
     const litros = ben.reduce((a, x) => a + (+x.litros || 0), 0);
@@ -377,6 +431,10 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div></div>
         <div class="kpi"><div class="mut small">Movimientos</div><div class="v">${ms.length}</div></div>
       </div></div>
+      ${rp.lista.length ? `<div class="card"><h3>Pagos del mes</h3>
+        <p class="small">${rp.pend.length ? `<b>${rp.pend.length} pendiente${rp.pend.length === 1 ? '' : 's'}</b>${rp.porPagar ? ` · ${clp(rp.porPagar)}` : ''}${rp.variables ? ` · ${rp.variables} sin monto fijo` : ''}` : '<span class="ok">✓ Todos pagados</span>'}</p>
+        ${rp.pend.slice(0, 3).map(({ p }) => { const [c, t] = estadoPago(p, S.mes); return `<div class="bar-l small"><span>${esc(p.nombre)}</span><span class="${c}">${esc(t)}</span></div>`; }).join('')}
+        <button class="link" data-act="tab" data-v="pagos">Ver pagos</button></div>` : ''}
       <div class="card"><h3>Atajos</h3>
         ${ts.length ? `<div class="atajos">${ts.slice(0, 9).map(t => `<button class="atajo" data-act="usar" data-id="${t.id}"><b>${esc(t.nombre)}</b><span>${t.monto ? clp(t.monto) : 'ingresar monto'}</span></button>`).join('')}</div>`
           : `<p class="mut small">Crea atajos para lo que repites (bencina, una transferencia fija…) y regístralo con un toque.</p>`}
@@ -385,7 +443,9 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Compras del mes</div><div class="v">${clp(credMes)}</div></div>
         <div class="kpi"><div class="mut small">Pagado este mes</div><div class="v">${clp(P)}</div></div>
         <div class="kpi wide"><div class="mut small">Por pagar (compras − pagos registrados)</div><div class="v ${deuda > 0 ? 'bad' : ''}">${clp(deuda)}</div></div>
-      </div><p class="mut small">Las compras con crédito cuentan como gasto el día que compras. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
+      </div>${detalleTarjetas(S.mes).map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
+        <div class="mut small">Compras del mes ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
+      <p class="mut small">Las compras con crédito cuentan como gasto el día que compras. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
       ${gastos.length ? `<div class="card"><h3>Gastos por categoría</h3>${bars(group(gastos, x => x.categoria || 'Otros'), G)}</div>` : ''}
       ${transf.length ? `<div class="card"><h3>Transferencias por persona</h3>${bars(group(transf, x => x.persona || 'Sin nombre'), T)}</div>` : ''}
       ${ben.length || rend.length ? `<div class="card"><h3>⛽ Bencina</h3><div class="kpis">
@@ -405,12 +465,26 @@ const VIEWS = {
     }
     return html;
   },
+  pagos() {
+    const r = resumenPagos(S.mes);
+    return `<div class="card"><div class="kpis">
+        <div class="kpi"><div class="mut small">Por pagar${r.variables ? ` (+${r.variables} sin monto fijo)` : ''}</div><div class="v ${r.porPagar ? 'bad' : ''}">${clp(r.porPagar)}</div></div>
+        <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
+      </div></div>
+      <button class="btn" data-act="nuevo-pago">+ Nuevo pago mensual</button>
+      ${r.lista.map(({ p, mov }) => { const [c, t] = estadoPago(p, S.mes, mov); return `<div class="row pago">
+        <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
+          <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${nombreTarjeta(p.tarjetaId) ? ' · ' + esc(nombreTarjeta(p.tarjetaId)) : ''}</span></div></button>
+        <div class="pago-der"><div class="am">${mov ? clp(mov.monto) : p.monto ? clp(p.monto) : 'Variable'}</div>
+          ${mov ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn" data-act="pagar" data-id="${esc(p.id)}">Pagar</button>`}</div>
+      </div>`; }).join('') || '<div class="empty">Agrega lo que pagas todos los meses: tarjeta de crédito, arriendo, cuentas…</div>'}`;
+  },
   atajos() {
     const ts = tpls();
     return `<p class="mut small">Un atajo guarda un movimiento que repites. Si tiene monto, se registra con un solo toque desde Inicio; si no, te pide solo el monto.</p>
       <button class="btn" data-act="nuevo-atajo">+ Nuevo atajo</button>
       ${ts.map(t => `<button class="row" data-act="editar-atajo" data-id="${t.id}"><div class="ic">${t.tipo === 'gasto' ? (CAT_ICON[t.categoria] || ICON.gasto) : ICON[t.tipo]}</div>
-        <div class="tx"><b>${esc(t.nombre)}</b><span>${esc(TIPOS[t.tipo])}${t.categoria ? ' · ' + esc(t.categoria) : ''}${t.persona ? ' · ' + esc(t.persona) : ''}${t.medio ? ' · ' + MEDIOS[t.medio] : ''}</span></div>
+        <div class="tx"><b>${esc(t.nombre)}</b><span>${esc(TIPOS[t.tipo])}${t.categoria ? ' · ' + esc(t.categoria) : ''}${t.persona ? ' · ' + esc(t.persona) : ''}${t.medio ? ' · ' + MEDIOS[t.medio] : ''}${nombreTarjeta(t.tarjetaId) ? ' · ' + esc(nombreTarjeta(t.tarjetaId)) : ''}</span></div>
         <div class="am">${t.monto ? clp(t.monto) : '—'}</div></button>`).join('') || '<div class="empty">Aún no tienes atajos.</div>'}`;
   },
   ajustes() {
@@ -422,15 +496,18 @@ const VIEWS = {
         <button class="btn sec" data-act="pw">Cambiar contraseña</button>
         <button class="btn danger" data-act="logout">Cerrar sesión</button>
         <p class="mut small">Al cerrar sesión se borran los datos de este dispositivo (siguen en tu cuenta). Úsalo si el dispositivo es compartido.</p></div>
+      <div class="card"><h3>Mis tarjetas</h3>
+        ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(deudaTarjeta(t.id))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
+        <button class="btn sec" data-act="nueva-tarjeta">+ Agregar tarjeta</button></div>
       <div class="card"><h3>Respaldo</h3><p class="mut small">Descarga una copia de tus datos (archivo JSON sin cifrar: guárdalo en un lugar seguro).</p>
         <button class="btn sec" data-act="exportar">Exportar respaldo</button>
         <label class="btn sec" style="color:var(--tx)">Importar respaldo<input type="file" accept="application/json,.json" id="imp" hidden></label></div>
-      <p class="mut small" style="text-align:center">${movs().length} movimientos · ${tpls().length} atajos</p>`;
+      <p class="mut small" style="text-align:center">${movs().length} movimientos · ${tpls().length} atajos · ${pagos().length} pagos mensuales</p>`;
   },
 };
 function rowHTML(m) {
   const titulo = m.tipo === 'transferencia' ? (m.persona || 'Transferencia') : m.tipo === 'pago_tarjeta' ? 'Pago tarjeta' : (m.categoria || TIPOS[m.tipo]);
-  const sub = [m.tipo === 'gasto' && MEDIOS[m.medio], m.litros && `${String(m.litros).replace('.', ',')} L`, m.km && `${fmtNum(m.km)} km`, m.nota].filter(Boolean).join(' · ');
+  const sub = [m.tipo === 'gasto' && MEDIOS[m.medio], nombreTarjeta(m.tarjetaId), m.litros && `${String(m.litros).replace('.', ',')} L`, m.km && `${fmtNum(m.km)} km`, m.nota].filter(Boolean).join(' · ');
   const ic = m.tipo === 'gasto' ? (CAT_ICON[m.categoria] || ICON.gasto) : ICON[m.tipo];
   const signo = m.tipo === 'ingreso' ? '' : '-';
   return `<button class="row" data-act="editar" data-id="${m.id}"><div class="ic">${ic}</div>
@@ -439,23 +516,34 @@ function rowHTML(m) {
 }
 
 // ---------- Formulario de movimiento / atajo
+function tarjetaCampo(r) {
+  const ts = tarjetas();
+  const sel = nombreTarjeta(r.tarjetaId) ? r.tarjetaId : (!r.id && ts.length === 1 ? ts[0].id : '');
+  return `<div data-tarjeta><label>Tarjeta<select name="tarjetaId">
+      <option value="">Sin especificar</option>
+      ${ts.map(t => `<option value="${esc(t.id)}" ${t.id === sel ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+      <option value="__nueva">+ Agregar tarjeta…</option>
+    </select></label>
+    <div data-tarjeta-nueva><label>Nombre de la tarjeta<input name="tarjetaNueva" maxlength="40" placeholder="Ej: CMR Falabella, BCI"></label></div></div>`;
+}
 function formHTML(r, isTpl) {
   const tipo = r.tipo || 'gasto', medio = r.medio || 'debito';
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   const pers = [...new Set(movs().map(x => x.persona).filter(Boolean))];
-  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" autocomplete="off">
-    <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : 'Nuevo movimiento')}</h2>
+  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" autocomplete="off">
+    <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
     <div class="seg">${Object.entries(TIPOS).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
     <label>Monto${isTpl ? ' (vacío si cambia cada vez)' : ''}<input name="monto" class="big" inputmode="numeric" value="${r.monto ? fmtNum(r.monto) : ''}" placeholder="$0" ${isTpl ? '' : 'required'}></label>
     <div data-show="gasto ingreso"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Comida"></label></div>
     <div data-show="gasto"><div class="seg">${Object.entries(MEDIOS).map(([k, v]) => `<label><input type="radio" name="medio" value="${k}" ${k === medio ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></div>
+    ${tarjetaCampo(r)}
     <div data-show="transferencia"><label>Persona<input name="persona" list="dl-per" value="${esc(r.persona || '')}" placeholder="¿A quién?"></label></div>
     ${isTpl ? '' : `<div data-bencina class="two"><label>Litros<input name="litros" inputmode="decimal" value="${r.litros ? String(r.litros).replace('.', ',') : ''}" placeholder="Opcional"></label>
       <label>Kilometraje<input name="km" inputmode="numeric" value="${r.km ? fmtNum(r.km) : ''}" placeholder="Opcional"></label></div>
       <label>Fecha<input type="date" name="fecha" required value="${esc(r.fecha || hoy())}"></label>`}
     <label>Nota<input name="nota" maxlength="120" value="${esc(r.nota || '')}" placeholder="Opcional"></label>
-    ${!isTpl && !r.id ? `<label class="chk" style="margin-top:14px"><input type="checkbox" name="comoAtajo"> Guardar también como atajo</label>
+    ${!isTpl && !r.id && !r.pagoId ? `<label class="chk" style="margin-top:14px"><input type="checkbox" name="comoAtajo"> Guardar también como atajo</label>
       <div data-atajo hidden><label>Nombre del atajo<input name="nombreAtajo" maxlength="40" placeholder="Ej: Plata a Juan"></label></div>` : ''}
     <div class="err" id="err"></div>
     <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
@@ -464,6 +552,72 @@ function formHTML(r, isTpl) {
     <datalist id="dl-per">${pers.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
   </form>`;
 }
+function abrirTarjetaForm(r = {}) {
+  openSheet(`<form id="f-tarjeta" data-id="${esc(r.id || '')}" autocomplete="off"><h2>${r.id ? 'Editar tarjeta' : 'Nueva tarjeta'}</h2>
+    <label>Nombre<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: CMR Falabella, BCI"></label>
+    <div class="err" id="err"></div>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${r.id ? `<button type="button" class="btn danger" data-act="borrar-tarjeta" data-id="${esc(r.id)}">Eliminar</button>` : ''}</form>`);
+}
+async function guardarTarjeta(f) {
+  const nombre = f.elements.nombre.value.trim(), id = f.dataset.id || undefined;
+  if (!nombre) throw new Error('Escribe el nombre de la tarjeta');
+  if (tarjetas().some(t => t.id !== id && t.nombre.toLowerCase() === nombre.toLowerCase())) throw new Error('Ya tienes una tarjeta con ese nombre');
+  await saveRec({ id, kind: 'tar', nombre }); closeSheet(); renderMain(); toast('Tarjeta guardada');
+}
+function pagoFormHTML(r) {
+  const tipo = r.tipo || 'gasto', medio = r.medio || 'debito';
+  const tipos = { gasto: TIPOS.gasto, pago_tarjeta: TIPOS.pago_tarjeta, transferencia: TIPOS.transferencia };
+  const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
+  return `<form id="f-pago" data-id="${esc(r.id || '')}" autocomplete="off">
+    <h2>${r.id ? 'Editar pago mensual' : 'Nuevo pago mensual'}</h2>
+    <label>Nombre<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Tarjeta de crédito, Arriendo"></label>
+    <label>Día de vencimiento (1 a 31)<input name="dia" type="number" min="1" max="31" step="1" inputmode="numeric" required value="${esc(r.dia || '')}" placeholder="Ej: 5"></label>
+    <div class="seg">${Object.entries(tipos).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
+    <label>Monto (vacío si cambia cada mes)<input name="monto" class="big" inputmode="numeric" value="${r.monto ? fmtNum(r.monto) : ''}" placeholder="$0"></label>
+    <div data-show="gasto"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Cuentas"></label>
+      <div class="seg">${Object.entries(MEDIOS).map(([k, v]) => `<label><input type="radio" name="medio" value="${k}" ${k === medio ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></div>
+    ${tarjetaCampo(r)}
+    <div data-show="transferencia"><label>Persona<input name="persona" value="${esc(r.persona || '')}" placeholder="¿A quién?"></label></div>
+    <label>Nota<input name="nota" maxlength="120" value="${esc(r.nota || '')}" placeholder="Opcional"></label>
+    <div class="err" id="err"></div>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${r.id ? `<button type="button" class="btn danger" data-act="borrar-pago" data-id="${esc(r.id)}">Eliminar</button>` : ''}
+    <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+  </form>`;
+}
+function abrirPagoForm(r = {}) { openSheet(pagoFormHTML(r)); actualizarForm($('#f-pago')); }
+async function guardarPago(f) {
+  const g = k => (f.elements[k]?.value ?? '').toString().trim();
+  const id = f.dataset.id || undefined, prev = id ? S.items.get(id) : null;
+  const dia = parseInt(g('dia'), 10);
+  if (!(dia >= 1 && dia <= 31)) throw new Error('El día debe estar entre 1 y 31');
+  const tipo = f.querySelector('input[name=tipo]:checked').value;
+  const mesActual = hoy().slice(0, 7);
+  const rec = { id, kind: 'pag', nombre: g('nombre') || 'Pago', dia, tipo, monto: parseMonto(g('monto')), desde: prev?.desde || (S.mes < mesActual ? S.mes : mesActual) };
+  if (tipo === 'gasto') { rec.categoria = g('categoria') || 'Cuentas'; rec.medio = f.querySelector('input[name=medio]:checked')?.value || 'debito'; }
+  if (tipo === 'transferencia') rec.persona = g('persona');
+  if (g('nota')) rec.nota = g('nota');
+  const tarjetaId = await resolverTarjeta(f, tipo);
+  if (tarjetaId) rec.tarjetaId = tarjetaId;
+  await saveRec(rec); closeSheet(); renderMain(); toast('Pago mensual guardado');
+}
+async function pagarPago(id) {
+  const p = S.items.get(id); if (!p) return;
+  const m = S.mes;
+  if (pagoMov(p, m)) { renderMain(); return; }
+  const base = { tipo: p.tipo, categoria: p.categoria, medio: p.medio, persona: p.persona, tarjetaId: p.tarjetaId, nota: p.nota || p.nombre, pagoId: p.id, pagoMes: m };
+  Object.keys(base).forEach(k => base[k] === undefined && delete base[k]);
+  // Un mes pasado queda con su fecha de vencimiento, para que el gasto caiga en ese mes
+  const fecha = m < hoy().slice(0, 7) ? vencimiento(p, m) : hoy();
+  if (!p.monto) {
+    const deuda = p.tipo === 'pago_tarjeta' ? deudaTarjeta(nombreTarjeta(p.tarjetaId) ? p.tarjetaId : undefined) : 0;
+    abrirForm({ ...base, fecha, monto: deuda > 0 ? deuda : 0 }); return;
+  }
+  const mov = await saveRec({ kind: 'mov', fecha, monto: p.monto, ...base });
+  renderMain();
+  toast(`${p.nombre}: ${clp(p.monto)} registrado`, { label: 'Deshacer', fn: async () => { await delRec(mov.id); renderMain(); } }, 6000);
+}
 function abrirForm(r = {}, isTpl = false) { openSheet(formHTML(r, isTpl)); actualizarForm($('#f-mov')); }
 function actualizarForm(f) {
   if (!f) return;
@@ -471,6 +625,11 @@ function actualizarForm(f) {
   f.querySelectorAll('[data-show]').forEach(el => { el.hidden = !el.dataset.show.split(' ').includes(tipo); });
   const b = f.querySelector('[data-bencina]'); if (b) b.hidden = !(tipo === 'gasto' && isBencina(f.categoria.value));
   const a = f.querySelector('[data-atajo]'); if (a) a.hidden = !f.comoAtajo.checked;
+  const tj = f.querySelector('[data-tarjeta]');
+  if (tj) {
+    tj.hidden = !(tipo === 'pago_tarjeta' || (tipo === 'gasto' && f.querySelector('input[name=medio]:checked')?.value === 'credito'));
+    tj.querySelector('[data-tarjeta-nueva]').hidden = f.elements.tarjetaId.value !== '__nueva';
+  }
 }
 async function guardarForm(f) {
   const g = k => (f.elements[k] ? (f.elements[k].value ?? '') : '').toString().trim();
@@ -483,12 +642,16 @@ async function guardarForm(f) {
   if (tipo === 'gasto') base.medio = f.querySelector('input[name=medio]:checked')?.value || 'debito';
   if (tipo === 'transferencia') base.persona = g('persona');
   if (g('nota')) base.nota = g('nota');
+  const tarjetaId = await resolverTarjeta(f, tipo);
+  if (tarjetaId) base.tarjetaId = tarjetaId;
   if (isTpl) {
     const prev = id ? S.items.get(id) : null;
     await saveRec({ id, kind: 'tpl', nombre: g('nombre') || 'Atajo', usos: prev?.usos || 0, ...base });
     closeSheet(); toast('Atajo guardado'); renderMain(); return;
   }
   const rec = { id, kind: 'mov', fecha: g('fecha') || hoy(), ...base };
+  const pagoMes = f.dataset.pagoMes;
+  if (f.dataset.pagoId && pagoMes) { rec.pagoId = f.dataset.pagoId; rec.pagoMes = pagoMes; }
   if (tipo === 'gasto' && isBencina(base.categoria)) { const l = parseDec(g('litros')), km = parseMonto(g('km')); if (l) rec.litros = l; if (km) rec.km = km; }
   await saveRec(rec);
   if (f.comoAtajo?.checked) {
@@ -496,12 +659,12 @@ async function guardarForm(f) {
     if (isBencina(base.categoria)) t.monto = 0;
     await saveRec(t);
   }
-  closeSheet(); S.mes = rec.fecha.slice(0, 7); renderMain(); toast(id ? 'Movimiento actualizado' : 'Movimiento guardado');
+  closeSheet(); S.mes = pagoMes || rec.fecha.slice(0, 7); renderMain(); toast(id ? 'Movimiento actualizado' : 'Movimiento guardado');
 }
 async function usarAtajo(id) {
   const t = S.items.get(id); if (!t) return;
   t.usos = (t.usos || 0) + 1; await saveRec(t);
-  const base = { tipo: t.tipo, categoria: t.categoria, medio: t.medio, persona: t.persona, nota: t.nota };
+  const base = { tipo: t.tipo, categoria: t.categoria, medio: t.medio, persona: t.persona, tarjetaId: t.tarjetaId, nota: t.nota };
   Object.keys(base).forEach(k => base[k] === undefined && delete base[k]);
   if (!t.monto) { abrirForm({ ...base, fecha: hoy() }); return; }
   const m = await saveRec({ kind: 'mov', fecha: hoy(), monto: t.monto, ...base });
@@ -528,6 +691,13 @@ document.addEventListener('click', async e => {
       case 'editar': abrirForm(S.items.get(el.dataset.id)); break;
       case 'editar-atajo': abrirForm(S.items.get(el.dataset.id), true); break;
       case 'usar': await usarAtajo(el.dataset.id); break;
+      case 'nueva-tarjeta': abrirTarjetaForm(); break;
+      case 'editar-tarjeta': abrirTarjetaForm(S.items.get(el.dataset.id)); break;
+      case 'borrar-tarjeta': if (await confirmar('¿Eliminar tarjeta?', 'Sus compras y pagos se conservan, pero quedan como "Sin tarjeta asignada".', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
+      case 'nuevo-pago': abrirPagoForm(); break;
+      case 'editar-pago': abrirPagoForm(S.items.get(el.dataset.id)); break;
+      case 'pagar': await pagarPago(el.dataset.id); break;
+      case 'borrar-pago': if (await confirmar('¿Eliminar pago mensual?', 'Los movimientos ya registrados no se borran.', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
       case 'borrar-mov': {
         const m = S.items.get(el.dataset.id); closeSheet(); await delRec(m.id); renderMain();
         toast('Movimiento eliminado', { label: 'Deshacer', fn: async () => { await saveRec(m); renderMain(); } }, 6000); break;
@@ -561,6 +731,8 @@ document.addEventListener('submit', async e => {
   if (btn) btn.disabled = true;
   try {
     if (f.id === 'f-mov') await guardarForm(f);
+    else if (f.id === 'f-pago') await guardarPago(f);
+    else if (f.id === 'f-tarjeta') await guardarTarjeta(f);
     else if (f.id === 'f-login') { if (btn) btn.textContent = 'Ingresando…'; S.loginMsg = ''; await ingresar(f.email.value.trim(), f.pw.value); }
     else if (f.id === 'f-mfa') { if (btn) btn.textContent = 'Verificando…'; await verificarCodigo(f.code.value); }
     else if (f.id === 'f-pw') {
@@ -575,11 +747,11 @@ document.addEventListener('submit', async e => {
 });
 
 document.addEventListener('change', async e => {
-  const f = e.target.closest('#f-mov'); if (f) actualizarForm(f);
+  const f = e.target.closest('#f-mov, #f-pago'); if (f) actualizarForm(f);
   if (e.target.id === 'imp' && e.target.files[0]) { try { await importar(e.target.files[0]); } catch (ex) { toast(ex.message); } e.target.value = ''; }
 });
 document.addEventListener('input', e => {
-  const f = e.target.closest('#f-mov'); if (!f) return;
+  const f = e.target.closest('#f-mov, #f-pago'); if (!f) return;
   if (e.target.name === 'monto' || e.target.name === 'km') { const n = parseMonto(e.target.value); e.target.value = n ? fmtNum(n) : ''; }
   if (e.target.name === 'categoria') actualizarForm(f);
 });
