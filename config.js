@@ -4,6 +4,6 @@
 // la seguridad la dan el login, las reglas RLS y el cifrado en el dispositivo.
 // Si los dejas así, la app funciona solo en el dispositivo, sin sincronizar.
 window.FIN_CONFIG = {
-  supabaseUrl: 'https://TU-PROYECTO.supabase.co',
-  supabaseKey: 'TU_CLAVE_PUBLICABLE'
+  supabaseUrl: 'https://oiicmnovmerlystkcvnb.supabase.co',
+  supabaseKey: 'sb_publishable_VCAFvt34mSoQlvHKgwh2zA_7y8EteEE'
 };
