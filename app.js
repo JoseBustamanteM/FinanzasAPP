@@ -122,19 +122,20 @@ async function resolverTarjeta(f, tipo) {
 const pagos = () => [...S.items.values()].filter(x => x.kind === 'pag').sort((a, b) => a.dia - b.dia || a.nombre.localeCompare(b.nombre));
 const pagoMov = (p, m) => movs().find(x => x.pagoId === p.id && x.pagoMes === m);
 function vencimiento(p, m) {
-  if (p.estados?.[m]?.vence) return p.estados[m].vence;
-  const [y, mo] = m.split('-').map(Number);
-  return `${m}-${String(Math.min(p.dia, new Date(y, mo, 0).getDate())).padStart(2, '0')}`;
+  // Las cuotas vencen con su tarjeta, y el mes de vencimiento sigue el último estado de cuenta importado
+  const q = p.tipo === 'pago_tarjeta' ? p : esCargoTarjeta(p) ? pagoDeTarjeta(p.tarjetaId) : null;
+  if (q?.estados?.[m]?.vence) return q.estados[m].vence;
+  const ultimo = Object.keys(q?.estados || {}).sort().pop();
+  const mv = ultimo ? shiftMes(m, difMes(ultimo, q.estados[ultimo].vence.slice(0, 7))) : m;
+  const [y, mo] = mv.split('-').map(Number);
+  return `${mv}-${String(Math.min(p.dia, new Date(y, mo, 0).getDate())).padStart(2, '0')}`;
 }
-// Las cuotas se calculan desde los movimientos: al deshacer un pago, el contador se recupera solo
-function cuotasRestantes(p) {
-  if (!p.cuotasTotal) return null;
-  const pagadas = movs().filter(x => x.pagoId === p.id).length;
-  return Math.max(0, p.cuotasTotal - (p.cuotasPrevias || 0) - pagadas);
-}
-function ultimoMesCuota(p) {
-  const hechos = movs().filter(x => x.pagoId === p.id).map(x => x.pagoMes).sort();
-  return shiftMes(hechos.length ? hechos[hechos.length - 1] : shiftMes(p.desde, -1), cuotasRestantes(p));
+// La cuota avanza con el mes, como en la facturación del banco, aunque un mes anterior siga sin marcar
+const cuotaDelMes = (p, m) => Math.min(p.cuotasTotal, (p.cuotasPrevias || 0) + 1 + Math.max(0, difMes(p.desde, m)));
+const ultimoMesCuota = p => shiftMes(p.desde, p.cuotasTotal - (p.cuotasPrevias || 0) - 1);
+function textoCuota(p, m, pagada) {
+  const n = cuotaDelMes(p, m), quedan = p.cuotasTotal - n + (pagada ? 0 : 1);
+  return n === p.cuotasTotal ? `Última cuota · ${n} de ${n}` : `Cuota ${n} de ${p.cuotasTotal} · quedan ${quedan}`;
 }
 const pagoVisible = (p, m) => (p.desde || '') <= m && (!p.cuotasTotal || m <= ultimoMesCuota(p));
 // Sin estado de cuenta ni monto fijo, la tarjeta estima su pago con las cuotas pendientes del mes
@@ -588,11 +589,11 @@ const VIEWS = {
   },
 };
 function filaPago({ p, mov }, m) {
-  const [c, t] = estadoPago(p, m, mov), rest = cuotasRestantes(p), tar = nombreTarjeta(p.tarjetaId), saldo = mov ? saldoTarjeta(p, m) : 0, monto = saldo || (mov ? pagadoEnMes(p, m) : montoPago(p, m));
+  const [c, t] = estadoPago(p, m, mov), tar = nombreTarjeta(p.tarjetaId), saldo = mov ? saldoTarjeta(p, m) : 0, monto = saldo || (mov ? pagadoEnMes(p, m) : montoPago(p, m));
   return `<div class="row pago">
     <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
       <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${tar && !enTarjeta(p) ? ' · ' + esc(tar) : ''}</span>
-      ${rest !== null ? `<span>${rest ? `Quedan ${rest} de ${p.cuotasTotal} cuotas` : `Última cuota · ${p.cuotasTotal} de ${p.cuotasTotal}`}</span>` : ''}</div></button>
+      ${p.cuotasTotal ? `<span>${textoCuota(p, m, !!mov)}</span>` : ''}</div></button>
     <div class="pago-der"><div class="am">${monto ? clp(monto) : 'Variable'}</div>
       ${mov && !saldo ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div>
   </div>`;
@@ -667,9 +668,9 @@ function pagoFormHTML(r) {
     <label>Día de vencimiento (1 a 31)<input name="dia" type="number" min="1" max="31" step="1" inputmode="numeric" required value="${esc(r.dia || '')}" placeholder="Ej: 5"></label>
     <div class="seg">${Object.entries(tipos).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
     <label>Monto (vacío si cambia cada mes)<input name="monto" class="big" inputmode="numeric" value="${r.monto ? fmtNum(r.monto) : ''}" placeholder="$0"></label>
-    <div class="two"><label>Próxima cuota<input name="cuotaProx" inputmode="numeric" value="${r.cuotasTotal ? r.cuotasTotal - cuotasRestantes(r) + 1 : ''}" placeholder="Opcional"></label>
+    <div class="two"><label>Cuota de este mes<input name="cuotaProx" inputmode="numeric" value="${r.cuotasTotal ? cuotaDelMes(r, S.mes) : ''}" placeholder="Opcional"></label>
       <label>Total de cuotas<input name="cuotaTotal" inputmode="numeric" value="${r.cuotasTotal || ''}" placeholder="Opcional"></label></div>
-    <p class="mut small">Usa las cuotas si este pago tiene fin, como una compra en 12 cuotas. Se descuentan al marcarlo pagado.</p>
+    <p class="mut small">Usa las cuotas si este pago tiene fin, como una compra en 12 cuotas. La cuota avanza sola cada mes.</p>
     <div data-show="gasto"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Cuentas"></label>
       <div class="seg">${Object.entries(MEDIOS).map(([k, v]) => `<label><input type="radio" name="medio" value="${k}" ${k === medio ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></div>
     ${tarjetaCampo(r)}
@@ -693,9 +694,10 @@ async function guardarPago(f) {
   if (prev?.estados) rec.estados = prev.estados;
   const cTotal = parseMonto(g('cuotaTotal')), cProx = parseMonto(g('cuotaProx')) || 1;
   if (cTotal) {
-    if (cProx > cTotal + 1) throw new Error('La próxima cuota no puede ser mayor que el total');
-    const pagadas = id ? movs().filter(x => x.pagoId === id).length : 0;
-    rec.cuotasTotal = cTotal; rec.cuotasPrevias = Math.max(0, cProx - 1 - pagadas);
+    if (cProx > cTotal) throw new Error('La cuota de este mes no puede ser mayor que el total');
+    const previas = cProx - 1 - difMes(rec.desde, S.mes);
+    if (previas < 0) rec.desde = S.mes;
+    rec.cuotasTotal = cTotal; rec.cuotasPrevias = previas < 0 ? cProx - 1 : previas;
   }
   if (tipo === 'gasto') { rec.categoria = g('categoria') || 'Cuentas'; rec.medio = f.querySelector('input[name=medio]:checked')?.value || 'debito'; }
   if (tipo === 'transferencia') rec.persona = g('persona');
