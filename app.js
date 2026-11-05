@@ -28,6 +28,7 @@ const parseDec = s => parseFloat(String(s || '').replace(/\./g, '').replace(',',
 function hoy() { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function mesLabel(m) { const [y, mo] = m.split('-').map(Number); return `${MESES[mo - 1]} ${y}`; }
+const difMes = (a, b) => { const [ya, ma] = a.split('-').map(Number), [yb, mb] = b.split('-').map(Number); return (yb - ya) * 12 + mb - ma; };
 function shiftMes(m, d) { let [y, mo] = m.split('-').map(Number); mo += d; while (mo < 1) { mo += 12; y--; } while (mo > 12) { mo -= 12; y++; } return `${y}-${String(mo).padStart(2, '0')}`; }
 function diaLabel(f) { const d = new Date(f + 'T12:00:00'); return d.toLocaleDateString('es-CL', { weekday: 'long', day: 'numeric', month: 'long' }); }
 const isBencina = c => /bencina|combustible|nafta|gasolina/i.test(c || '');
@@ -540,6 +541,10 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Total a pagar</div><div class="v">${clp(r.total)}</div></div>
         <div class="kpi"><div class="mut small">Pagar hasta</div><div class="v">${esc(r.vence.split('-').reverse().join('/'))}</div></div>
       </div>${tarjetaCampo({ id: 'x' })}
+      <label>Registrar en el mes<select name="mesPago">
+        ${[...new Set([...[-2, -1, 0, 1].map(d => shiftMes(r.mes, d)), S.mes])].sort().map(m => `<option value="${m}" ${m === S.mes ? 'selected' : ''}>${mesLabel(m)}</option>`).join('')}
+      </select></label>
+      <p class="small warn" id="imp-mes" hidden></p>
       <div class="note" id="imp-res"></div></div>
       <p class="mut small">Revisa cada línea y corrige lo que haga falta. Nada se guarda hasta que confirmes.</p>
       ${r.lineas.map((l, i) => `<div class="imp" data-i="${i}">
@@ -711,8 +716,9 @@ async function pagarPago(id) {
   }
   const base = { tipo: p.tipo, categoria: p.categoria, medio: p.medio, persona: p.persona, tarjetaId: p.tarjetaId, nota: p.nota || p.nombre, pagoId: p.id, pagoMes: m };
   Object.keys(base).forEach(k => base[k] === undefined && delete base[k]);
-  // Un mes pasado queda con su fecha de vencimiento, para que el gasto caiga en ese mes
-  const fecha = m < hoy().slice(0, 7) ? vencimiento(p, m) : hoy();
+  // Un mes pasado queda con su vencimiento o, si este cae en otro mes, con su último día
+  const venceEn = vencimiento(p, m);
+  const fecha = m >= hoy().slice(0, 7) ? hoy() : venceEn.startsWith(m) ? venceEn : `${m}-${String(new Date(+m.slice(0, 4), +m.slice(5), 0).getDate())}`;
   if (!p.monto || p.estados?.[m]?.total || saldo) {
     const conTarjeta = !!nombreTarjeta(p.tarjetaId);
     const deuda = p.tipo !== 'pago_tarjeta' ? 0 : saldo || p.estados?.[m]?.total || (conTarjeta ? porPagarTarjeta(p.tarjetaId, m) : deudaTarjeta());
@@ -751,6 +757,11 @@ async function cargarEstado(file, password) {
   if (!igual) f.elements.tarjetaNueva.value = r.nombre;
   actualizarImport(f);
 }
+// El mismo estado de cuenta ya importado en otro mes
+function estadoEnOtroMes(tarjetaId, m) {
+  const q = pagoDeTarjeta(tarjetaId), r = S.imp;
+  return q && Object.keys(q.estados || {}).find(k => k !== m && q.estados[k].vence === r.vence && q.estados[k].total === r.total);
+}
 function leerLinea(el) {
   const v = k => el.querySelector(`[name=${k}]`).value.trim();
   return { desc: v('desc'), fecha: v('fecha'), monto: parseMonto(v('monto')), accion: v('accion'), n: parseMonto(v('n')), de: parseMonto(v('de')) };
@@ -766,7 +777,10 @@ function actualizarImport(f) {
     else if (S.imp.lineas[+el.dataset.i].existe) { yaEstan++; if (l.n !== 0) suma += l.monto; } // ya registradas: también cuentan para cuadrar con el banco
     else if (S.imp.lineas[+el.dataset.i].pago) abonos += l.monto;
   });
-  const dif = suma - S.imp.total;
+  const dif = suma - S.imp.total, m = f.elements.mesPago.value, otro = estadoEnOtroMes(f.elements.tarjetaId.value, m), aviso = $('#imp-mes');
+  aviso.textContent = otro ? `Este estado de cuenta ya está en ${mesLabel(otro)}. Al confirmar se moverá a ${mesLabel(m)}.`
+    : m !== S.imp.mes ? `El banco indica que vence el ${S.imp.vence.split('-').reverse().join('/')}. Lo verás en ${mesLabel(m)} porque lo elegiste aquí.` : '';
+  aviso.hidden = !aviso.textContent;
   $('#imp-res').innerHTML = `${cuantas} línea${cuantas === 1 ? '' : 's'} por registrar${yaEstan ? ` · ${yaEstan} ya registrada${yaEstan === 1 ? '' : 's'}` : ''} · suma <b>${clp(suma)}</b><br>${abonos ? `Pagos a la tarjeta leídos: ${clp(abonos)} (no se suman)<br>` : ''}${dif === 0 ? '<span class="ok">✓ Coincide con el total del banco</span>' : `<span class="warn">⚠️ Diferencia con el total del banco: ${clp(dif)}</span>`}`;
 }
 async function guardarImport(f) {
@@ -779,20 +793,32 @@ async function guardarImport(f) {
   }
   const tarjetaId = await resolverTarjeta(f, 'pago_tarjeta');
   if (!tarjetaId) throw new Error('Elige a qué tarjeta corresponde este estado de cuenta');
-  const dia = +r.vence.slice(8, 10);
-  const q = pagoDeTarjeta(tarjetaId) || { kind: 'pag', nombre: 'Pago ' + nombreTarjeta(tarjetaId), dia, tipo: 'pago_tarjeta', tarjetaId, monto: 0, desde: r.mes };
-  await saveRec({ ...q, desde: q.desde < r.mes ? q.desde : r.mes, estados: { ...(q.estados || {}), [r.mes]: { total: r.total, vence: r.vence } } });
+  const dia = +r.vence.slice(8, 10), mes = f.elements.mesPago.value, salto = difMes(r.mes, mes);
+  const q = pagoDeTarjeta(tarjetaId) || { kind: 'pag', nombre: 'Pago ' + nombreTarjeta(tarjetaId), dia, tipo: 'pago_tarjeta', tarjetaId, monto: 0, desde: mes };
+  const estados = { ...(q.estados || {}) }, otro = estadoEnOtroMes(tarjetaId, mes);
+  if (otro) {
+    if (pagadoEnMes(q, otro)) throw new Error(`Este estado de cuenta ya tiene un pago en ${mesLabel(otro)}. Elimina ese pago antes de moverlo.`);
+    delete estados[otro];
+    // Lo ya importado se mueve con el estado de cuenta, para que no quede en el mes anterior
+    const movidas = new Set();
+    for (const l of r.lineas.filter(x => x.existe && x.de > 1)) {
+      const p = pagos().find(c => !movidas.has(c.id) && esCargoTarjeta(c) && c.tarjetaId === tarjetaId && c.cuotasTotal === l.de && c.monto === l.monto && !movs().some(x => x.pagoId === c.id));
+      if (p) { movidas.add(p.id); await saveRec({ ...p, desde: shiftMes(p.desde, difMes(otro, mes)) }); }
+    }
+  }
+  const desde = otro && q.desde === otro ? mes : q.desde < mes ? q.desde : mes;
+  await saveRec({ ...q, desde, estados: { ...estados, [mes]: { total: r.total, vence: r.vence } } });
   let n = 0;
   for (let i = 0; i < lineas.length; i++) {
     const l = lineas[i]; if (l.accion === 'ignorar') continue;
     if (l.accion === 'cuotas') {
-      await saveRec({ kind: 'pag', nombre: l.desc, dia, tipo: 'gasto', categoria: 'Compras', medio: 'credito', tarjetaId, monto: l.monto, cuotasTotal: l.de, cuotasPrevias: Math.max(0, l.n - 1), desde: l.n === 0 ? (r.lineas[i].primerMes || shiftMes(r.mes, 1)) : r.mes });
+      await saveRec({ kind: 'pag', nombre: l.desc, dia, tipo: 'gasto', categoria: 'Compras', medio: 'credito', tarjetaId, monto: l.monto, cuotasTotal: l.de, cuotasPrevias: Math.max(0, l.n - 1), desde: l.n === 0 ? shiftMes(r.lineas[i].primerMes || shiftMes(r.mes, 1), salto) : mes });
     } else {
       await saveRec({ kind: 'mov', tipo: 'gasto', categoria: l.accion === 'cargo' ? 'Cuentas' : 'Compras', medio: 'credito', tarjetaId, monto: l.monto, fecha: l.fecha, nota: l.desc });
     }
     n++;
   }
-  S.mes = r.mes; S.imp = null; S.view = 'pagos'; renderMain(); window.scrollTo(0, 0);
+  S.mes = mes; S.imp = null; S.view = 'pagos'; renderMain(); window.scrollTo(0, 0);
   toast(`${n} línea${n === 1 ? '' : 's'} guardada${n === 1 ? '' : 's'}`);
 }
 function abrirForm(r = {}, isTpl = false) { openSheet(formHTML(r, isTpl)); actualizarForm($('#f-mov')); }

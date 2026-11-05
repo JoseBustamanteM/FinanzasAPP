@@ -68,7 +68,7 @@ En los demás dispositivos, cada vez que la persona inicia sesión: correo, cont
 - **+** registra un movimiento: gasto, ingreso, transferencia o pago de tarjeta.
 - **Atajos:** lo que repites queda a un toque. Si el atajo tiene monto fijo, se registra al instante y se puede deshacer.
 - **Pagos:** agrega tus pagos recurrentes (tarjeta, arriendo, cuentas) con su día de vencimiento y, si tienen fin, sus cuotas. En cada mes ves qué está pendiente o atrasado; al tocar *Pagar* se crea el movimiento y se descuenta la cuota. Para deshacerlo, toca *✓ Pagado* y elimina ese movimiento.
-- **Importar estado de cuenta:** en Pagos, sube el PDF de CMR Falabella o BCI, revisa cada línea y confirma. Al pagar el total de la tarjeta, sus cuotas del mes quedan pagadas; si pagas una parte, siguen pendientes. **No subas tus PDF al repositorio.**
+- **Importar estado de cuenta:** en Pagos, sube el PDF de CMR Falabella o BCI, revisa cada línea y confirma. El estado de cuenta queda en el mes que elijas en la revisión; por defecto, el mes que tienes abierto. Al pagar el total de la tarjeta, sus cuotas del mes quedan pagadas; si pagas una parte, siguen pendientes. **No subas tus PDF al repositorio.**
 - **Tarjeta de crédito:** agrega tus tarjetas en Ajustes (o al registrar una compra) y registra las compras como *Gasto → Crédito*, eligiendo la tarjeta. En Inicio ves cuánto debes en cada una. Cuando pagues el estado de cuenta, usa *Pago tarjeta*; ese pago no se cuenta dos veces.
 - **Bencina:** si anotas los litros y el kilometraje llenando el estanque completo, la app calcula el rendimiento en km/l.
 - **Sin internet** también funciona: los cambios se sincronizan cuando vuelve la conexión.

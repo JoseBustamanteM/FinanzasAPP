@@ -72,7 +72,7 @@ window.FinImport = (() => {
         }
         l.accion = 'cuotas'; l.primerMes = l.primerMes || sigMes(mes);
         l.monto = l.monto || Math.round(l.total / l.de);
-        l.aviso = `Aún no se cobra: la primera cuota parte en ${l.primerMes}. No suma a este estado de cuenta.`;
+        l.aviso = `Aún no se cobra: según el banco, la primera cuota parte en ${l.primerMes}. No suma a este estado de cuenta.`;
         continue;
       }
       if (l.de > 1) { l.accion = 'cuotas'; continue; }
