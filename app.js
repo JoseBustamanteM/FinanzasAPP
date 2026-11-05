@@ -724,12 +724,14 @@ async function pagarPago(id) {
 }
 // ---------- Importar estado de cuenta
 async function cargarEstado(file, password) {
-  S.impFile = file;
   let filas;
   toast('Leyendo el estado de cuenta…');
-  try { filas = await FinImport.leerFilas(await file.arrayBuffer(), password); }
-  catch (ex) {
-    if (ex?.name !== 'PasswordException') { console.error(ex); throw new Error('No se pudo leer el PDF. Revisa que sea el archivo original del banco.'); }
+  try {
+    if (file) S.impDatos = await file.arrayBuffer(); // Se lee una vez: en Android, releer el archivo elegido puede fallar
+    const limite = new Promise((_, no) => setTimeout(() => no(new Error('el navegador tardó demasiado en leerlo')), 60000));
+    filas = await Promise.race([FinImport.leerFilas(S.impDatos, password), limite]);
+  } catch (ex) {
+    if (ex?.name !== 'PasswordException') { console.error(ex); throw new Error(`No se pudo leer el PDF. Revisa que sea el archivo original del banco. Detalle: ${ex?.message || ex}`); }
     openSheet(`<form id="f-clave"><h2>PDF con contraseña</h2><p class="mut small">La clave se usa solo para abrir el archivo en este dispositivo y no se guarda.</p>
       <label>Contraseña del PDF<input type="password" name="clave" required autocomplete="off"></label>
       <div class="err" id="err">${password ? 'Contraseña incorrecta.' : ''}</div>
@@ -743,7 +745,7 @@ async function cargarEstado(file, password) {
     if (l.accion === 'cuotas' && pagos().some(p => p.cuotasTotal === l.de && p.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un pago en cuotas igual. Se dejó sin registrar para no duplicarlo.'; }
     else if ((l.accion === 'compra' || l.accion === 'cargo') && movs().some(x => esCredito(x) && x.fecha === l.fecha && x.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un movimiento igual. Se dejó sin registrar para no duplicarlo.'; }
   }
-  closeSheet(); S.imp = r; S.view = 'revision'; renderMain(); window.scrollTo(0, 0);
+  S.impDatos = null; closeSheet(); S.imp = r; S.view = 'revision'; renderMain(); window.scrollTo(0, 0);
   const f = $('#f-import'), igual = tarjetas().find(t => r.clave.test(t.nombre));
   f.elements.tarjetaId.value = igual ? igual.id : '__nueva';
   if (!igual) f.elements.tarjetaNueva.value = r.nombre;
@@ -916,7 +918,7 @@ document.addEventListener('submit', async e => {
     else if (f.id === 'f-pago') await guardarPago(f);
     else if (f.id === 'f-tarjeta') await guardarTarjeta(f);
     else if (f.id === 'f-import') await guardarImport(f);
-    else if (f.id === 'f-clave') { const clave = f.clave.value; closeSheet(); await cargarEstado(S.impFile, clave); }
+    else if (f.id === 'f-clave') await cargarEstado(null, f.clave.value);
     else if (f.id === 'f-login') { if (btn) btn.textContent = 'Ingresando…'; S.loginMsg = ''; await ingresar(f.email.value.trim(), f.pw.value); }
     else if (f.id === 'f-mfa') { if (btn) btn.textContent = 'Verificando…'; await verificarCodigo(f.code.value); }
     else if (f.id === 'f-pw') {

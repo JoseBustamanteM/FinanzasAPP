@@ -15,19 +15,20 @@ window.FinImport = (() => {
     const pdfjs = await import('./vendor/pdf.min.mjs');
     pdfjs.GlobalWorkerOptions.workerSrc = new URL('vendor/pdf.worker.min.mjs', document.baseURI).href;
     const tarea = pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)), password, isEvalSupported: false, disableFontFace: true, verbosity: 0 });
-    const doc = await tarea.promise;
-    const filas = [];
-    for (let p = 1; p <= doc.numPages; p++) {
-      const { items } = await (await doc.getPage(p)).getTextContent();
-      const it = items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5] }));
-      it.sort((a, b) => b.y - a.y || a.x - b.x);
-      let cur = [];
-      const cerrar = () => { if (cur.length) { filas.push(cur.sort((a, b) => a.x - b.x).map(c => c.s).join(' ')); cur = []; } };
-      for (const i of it) { if (cur.length && Math.abs(i.y - cur[0].y) > 2.5) cerrar(); cur.push(i); }
-      cerrar();
-    }
-    await tarea.destroy();
-    return filas;
+    try {
+      const doc = await tarea.promise;
+      const filas = [];
+      for (let p = 1; p <= doc.numPages; p++) {
+        const { items } = await (await doc.getPage(p)).getTextContent();
+        const it = items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5] }));
+        it.sort((a, b) => b.y - a.y || a.x - b.x);
+        let cur = [];
+        const cerrar = () => { if (cur.length) { filas.push(cur.sort((a, b) => a.x - b.x).map(c => c.s).join(' ')); cur = []; } };
+        for (const i of it) { if (cur.length && Math.abs(i.y - cur[0].y) > 2.5) cerrar(); cur.push(i); }
+        cerrar();
+      }
+      return filas;
+    } finally { await tarea.destroy(); }
   }
 
   function lineasCMR(filas) {
