@@ -757,16 +757,17 @@ function leerLinea(el) {
 }
 function actualizarImport(f) {
   const tj = f.querySelector('[data-tarjeta-nueva]'); if (tj) tj.hidden = f.elements.tarjetaId.value !== '__nueva';
-  let suma = 0, cuantas = 0, yaEstan = 0;
+  let suma = 0, cuantas = 0, yaEstan = 0, abonos = 0;
   f.querySelectorAll('.imp').forEach(el => {
     const l = leerLinea(el);
     el.classList.toggle('off', l.accion === 'ignorar');
     el.querySelector('[data-cuotas]').hidden = l.accion !== 'cuotas';
     if (l.accion !== 'ignorar') { cuantas++; if (!(l.accion === 'cuotas' && l.n === 0)) suma += l.monto; }
     else if (S.imp.lineas[+el.dataset.i].existe) { yaEstan++; if (l.n !== 0) suma += l.monto; } // ya registradas: también cuentan para cuadrar con el banco
+    else if (S.imp.lineas[+el.dataset.i].pago) abonos += l.monto;
   });
   const dif = suma - S.imp.total;
-  $('#imp-res').innerHTML = `${cuantas} línea${cuantas === 1 ? '' : 's'} por registrar${yaEstan ? ` · ${yaEstan} ya registrada${yaEstan === 1 ? '' : 's'}` : ''} · suma <b>${clp(suma)}</b><br>${dif === 0 ? '<span class="ok">✓ Coincide con el total del banco</span>' : `<span class="warn">⚠️ Diferencia con el total del banco: ${clp(dif)}</span>`}`;
+  $('#imp-res').innerHTML = `${cuantas} línea${cuantas === 1 ? '' : 's'} por registrar${yaEstan ? ` · ${yaEstan} ya registrada${yaEstan === 1 ? '' : 's'}` : ''} · suma <b>${clp(suma)}</b><br>${abonos ? `Pagos a la tarjeta leídos: ${clp(abonos)} (no se suman)<br>` : ''}${dif === 0 ? '<span class="ok">✓ Coincide con el total del banco</span>' : `<span class="warn">⚠️ Diferencia con el total del banco: ${clp(dif)}</span>`}`;
 }
 async function guardarImport(f) {
   const r = S.imp, lineas = [...f.querySelectorAll('.imp')].map(leerLinea);

@@ -46,7 +46,8 @@ window.FinImport = (() => {
   function lineasNacional(filas) {
     const re = new RegExp(`(\\d{2}/\\d{2}/\\d{2})\\s+(\\d{9,})\\s+(.+?)\\s+\\$\\s*(${NUM})\\s+\\$\\s*(${NUM})\\s+(\\d{2})/(\\d{2})\\s+\\$\\s*(${NUM})\\s*$`);
     const out = [];
-    for (const f of filas) {
+    for (const fila of filas) {
+      const f = fila.replace(/-\s*\$\s*(?=\d)/g, '$$ -'); // Acepta "-$ 100" además de "$ -100"
       const m = f.match(re);
       if (m) out.push({ fecha: iso(m[1]), desc: m[3].replace(/\s+TASA.*$/, '').trim(), compra: n(m[4]), total: n(m[5]), n: +m[6], de: +m[7], monto: n(m[8]) });
     }
@@ -55,9 +56,15 @@ window.FinImport = (() => {
 
   // Sugiere qué hacer con cada línea; la persona lo confirma en la pantalla de revisión
   function clasificar(lineas, mes) {
-    const pagos = lineas.filter(l => l.compra < 0 || /pago tarjeta|monto cancelado/i.test(l.desc));
+    // Un monto negativo siempre es un abono. Con monto positivo, se reconoce por su descripción
+    const pagos = lineas.filter(l => l.compra < 0 || l.total < 0 || l.monto < 0 || /^(pago|abono)\b|monto cancelado|pago tarjeta|nota de cr[eé]dito|reversa/i.test(l.desc));
+    for (const p of pagos) p.pago = Math.abs(p.compra || p.total || p.monto);
     for (const l of lineas) {
-      if (pagos.includes(l)) { l.accion = 'ignorar'; l.aviso = 'Es un pago anterior a la tarjeta, no una compra.'; continue; }
+      if (pagos.includes(l)) {
+        l.accion = 'ignorar'; l.monto = l.pago;
+        l.aviso = 'Es un pago o abono a la tarjeta: no se suma a la deuda. Si fue una compra, cámbialo.';
+        continue;
+      }
       if (/impuesto|comisi[oó]n|inter[eé]s|servicio administraci/i.test(l.desc)) { l.accion = 'cargo'; continue; }
       if (l.n === 0) {
         if (lineas.some(o => o !== l && o.n > 0 && norm(o.desc) === norm(l.desc) && o.total === l.total)) {
@@ -70,7 +77,7 @@ window.FinImport = (() => {
       }
       if (l.de > 1) { l.accion = 'cuotas'; continue; }
       l.accion = 'compra';
-      if (pagos.some(p => p.fecha === l.fecha && Math.abs(p.compra) === l.compra)) {
+      if (pagos.some(p => p.fecha === l.fecha && p.pago === l.compra)) {
         l.accion = 'ignorar';
         l.aviso = 'Coincide con un pago de la tarjeta del mismo día y monto. Revisa si fue una compra real.';
       }
@@ -79,6 +86,7 @@ window.FinImport = (() => {
   }
 
   function analizar(filas) {
+    filas = filas.map(f => f.replace(/[\u2212\u2013](?=\s*\$?\s*\d)/g, '-'));
     const t = filas.join('\n'), dato = re => { const m = t.match(re); return m ? m[1] : null; };
     let r = null;
     if (/BancoFalabella|Fpuntos|Pago tarjeta cmr/i.test(t)) {
