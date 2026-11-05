@@ -1,7 +1,7 @@
 // Service worker: guarda la app en el teléfono para que funcione sin internet.
 // Nunca toca tus datos (esos viven cifrados en IndexedDB).
-const CACHE = 'finanzas-v5';
-const ASSETS = ['./', './index.html', './app.js', './config.js', './styles.css',
+const CACHE = 'finanzas-v6';
+const ASSETS = ['./', './index.html', './app.js', './importar.js', './vendor/pdf.min.mjs', './vendor/pdf.worker.min.mjs', './config.js', './styles.css',
   './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

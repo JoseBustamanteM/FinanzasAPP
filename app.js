@@ -99,7 +99,7 @@ function detalleTarjetas(m) {
   const ms = delMes(m);
   const fila = (clave, nombre) => {
     const de = ms.filter(x => claveTarjeta(x) === clave);
-    return { nombre, compras: sum(de.filter(esCredito)), pagado: sum(de.filter(x => x.tipo === 'pago_tarjeta')), deuda: deudaTarjeta(clave) };
+    return { nombre, compras: sum(de.filter(esCredito)), pagado: sum(de.filter(x => x.tipo === 'pago_tarjeta')), deuda: clave ? porPagarTarjeta(clave, m) : deudaTarjeta(clave) };
   };
   const out = tarjetas().map(t => fila(t.id, t.nombre));
   const sin = fila('', 'Sin tarjeta asignada');
@@ -121,15 +121,70 @@ async function resolverTarjeta(f, tipo) {
 const pagos = () => [...S.items.values()].filter(x => x.kind === 'pag').sort((a, b) => a.dia - b.dia || a.nombre.localeCompare(b.nombre));
 const pagoMov = (p, m) => movs().find(x => x.pagoId === p.id && x.pagoMes === m);
 function vencimiento(p, m) {
+  if (p.estados?.[m]?.vence) return p.estados[m].vence;
   const [y, mo] = m.split('-').map(Number);
   return `${m}-${String(Math.min(p.dia, new Date(y, mo, 0).getDate())).padStart(2, '0')}`;
 }
+// Las cuotas se calculan desde los movimientos: al deshacer un pago, el contador se recupera solo
+function cuotasRestantes(p) {
+  if (!p.cuotasTotal) return null;
+  const pagadas = movs().filter(x => x.pagoId === p.id).length;
+  return Math.max(0, p.cuotasTotal - (p.cuotasPrevias || 0) - pagadas);
+}
+function ultimoMesCuota(p) {
+  const hechos = movs().filter(x => x.pagoId === p.id).map(x => x.pagoMes).sort();
+  return shiftMes(hechos.length ? hechos[hechos.length - 1] : shiftMes(p.desde, -1), cuotasRestantes(p));
+}
+const pagoVisible = (p, m) => (p.desde || '') <= m && (!p.cuotasTotal || m <= ultimoMesCuota(p));
+// Sin estado de cuenta ni monto fijo, la tarjeta estima su pago con las cuotas pendientes del mes
+const montoPago = (p, m) => p.estados?.[m]?.total || p.monto || (p.tipo === 'pago_tarjeta' && nombreTarjeta(p.tarjetaId) ? sum(cargosPendientes(p.tarjetaId, m)) : 0);
+const pagoDeTarjeta = t => pagos().find(q => q.tipo === 'pago_tarjeta' && q.tarjetaId === t);
+const esCargoTarjeta = p => p.tipo === 'gasto' && p.medio === 'credito' && !!nombreTarjeta(p.tarjetaId);
+// Cuotas y cargos que se pagan junto con la tarjeta: no se suman aparte para no contarlos dos veces
+const enTarjeta = p => esCargoTarjeta(p) && !!pagoDeTarjeta(p.tarjetaId);
+const cargosPendientes = (t, m) => pagos().filter(p => esCargoTarjeta(p) && p.tarjetaId === t && pagoVisible(p, m) && !pagoMov(p, m));
+const pagadoEnMes = (p, m) => sum(movs().filter(x => x.pagoId === p.id && x.pagoMes === m));
+// Lo que falta de la tarjeta tras un pago parcial de ese mes
+function saldoTarjeta(p, m) {
+  if (p.tipo !== 'pago_tarjeta' || !nombreTarjeta(p.tarjetaId)) return 0;
+  const total = p.estados?.[m]?.total;
+  if (total) return Math.max(0, total - pagadoEnMes(p, m));
+  return cargosPendientes(p.tarjetaId, m).length ? Math.max(0, porPagarTarjeta(p.tarjetaId, m)) : 0;
+}
 function resumenPagos(m) {
-  const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || (x.p.desde || '') <= m);
-  const pend = lista.filter(x => !x.mov);
-  return { lista, pend, porPagar: sum(pend.map(x => x.p)), variables: pend.filter(x => !x.p.monto).length, pagado: sum(lista.filter(x => x.mov).map(x => x.mov)) };
+  const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || pagoVisible(x.p, m));
+  const propios = lista.filter(x => !enTarjeta(x.p)), falta = x => (x.mov ? saldoTarjeta(x.p, m) : montoPago(x.p, m));
+  const pend = propios.filter(x => !x.mov || saldoTarjeta(x.p, m) > 0);
+  return { lista, pend, porPagar: pend.reduce((a, x) => a + falta(x), 0), variables: pend.filter(x => !falta(x)).length, pagado: propios.reduce((a, x) => a + pagadoEnMes(x.p, m), 0) };
+}
+const porPagarTarjeta = (t, m) => deudaTarjeta(t) + sum(cargosPendientes(t, m));
+// Registra el pago de una tarjeta. Si cubre el total, deja pagadas todas sus cuotas de ese mes.
+async function registrarPagoTarjeta(rec) {
+  const t = rec.tarjetaId;
+  let m = rec.pagoMes || rec.fecha.slice(0, 7);
+  if (!rec.pagoMes && !cargosPendientes(t, m).length && cargosPendientes(t, shiftMes(m, 1)).length) m = shiftMes(m, 1);
+  const q = pagoDeTarjeta(t);
+  if (q && !rec.pagoId) { rec.pagoId = q.id; rec.pagoMes = m; }
+  const pend = cargosPendientes(t, m);
+  const total = q?.estados?.[m]?.total;
+  const requerido = total ? total - pagadoEnMes(q, m) : deudaTarjeta(t) + sum(pend);
+  const completo = rec.monto >= requerido;
+  const mov = await saveRec(rec);
+  if (completo) for (const p of pend) {
+    await saveRec({ kind: 'mov', fecha: rec.fecha, tipo: 'gasto', categoria: p.categoria || 'Compras', medio: 'credito', tarjetaId: t, monto: p.monto, nota: p.nota || p.nombre, pagoId: p.id, pagoMes: m, porPago: mov.id });
+  }
+  return { mov, marcadas: completo ? pend.length : 0, pendientes: completo ? 0 : pend.length };
+}
+const mensajePagoTarjeta = r => r.marcadas ? `Tarjeta pagada: ${r.marcadas} cuota${r.marcadas === 1 ? '' : 's'} marcada${r.marcadas === 1 ? '' : 's'}`
+  : r.pendientes ? `Pago parcial: ${r.pendientes} cuota${r.pendientes === 1 ? ' sigue pendiente' : 's siguen pendientes'}` : 'Pago de tarjeta registrado';
+async function eliminarConCuotas(mov) {
+  const hijas = movs().filter(x => x.porPago === mov.id);
+  await delRec(mov.id); for (const h of hijas) await delRec(h.id);
+  return [mov, ...hijas];
 }
 function estadoPago(p, m, mov) {
+  const saldo = mov ? saldoTarjeta(p, m) : 0;
+  if (saldo) return ['warn', `Pago parcial · faltan ${clp(saldo)}`];
   if (mov) return ['ok', `Pagado el ${+mov.fecha.slice(8, 10)}/${+mov.fecha.slice(5, 7)}`];
   const v = vencimiento(p, m), h = hoy(), dia = +v.slice(8, 10);
   if (v < h) return ['bad', `Atrasado · venció el ${dia}/${+v.slice(5, 7)}`];
@@ -228,7 +283,7 @@ async function sync() {
     }
     await DB.put('meta', max, 'lastSync');
     setSync('Sincronizado · ' + new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' }));
-    if (changed && S.screen === 'main' && !$('#modal').innerHTML) renderMain();
+    if (changed && S.screen === 'main' && !$('#modal').innerHTML && S.view !== 'revision') renderMain();
   } catch (e) {
     console.warn(e);
     if (e.status === 400 || e.status === 401 || e.status === 403) {
@@ -391,10 +446,10 @@ function renderMain() {
   app.innerHTML = `
     ${conMes ? `<header class="top"><button class="icon" data-act="mes" data-d="-1" aria-label="Mes anterior">‹</button>
       <div class="mes">${mesLabel(S.mes)}</div><button class="icon" data-act="mes" data-d="1" aria-label="Mes siguiente">›</button></header>`
-      : `<header class="top"><div class="mes">${TABS[S.view][1]}</div><span></span></header>`}
+      : `<header class="top"><div class="mes">${TABS[S.view]?.[1] || 'Revisar estado de cuenta'}</div><span></span></header>`}
     <div class="sync" id="sync">${esc(S.syncMsg)}</div>
     <main>${VIEWS[S.view]()}</main>
-    ${S.view !== 'ajustes' ? `<button class="fab" data-act="nuevo" aria-label="Nuevo movimiento">+</button>` : ''}
+    ${S.view !== 'ajustes' && S.view !== 'revision' ? `<button class="fab" data-act="nuevo" aria-label="Nuevo movimiento">+</button>` : ''}
     <nav class="tabs">${Object.entries(TABS).map(([k, [i, t]]) => `<button data-act="tab" data-v="${k}" class="${S.view === k ? 'on' : ''}"><i>${i}</i>${t}</button>`).join('')}</nav>`;
 }
 
@@ -416,7 +471,7 @@ const VIEWS = {
       transf = ms.filter(x => x.tipo === 'transferencia'), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
-    const deuda = deudaTarjeta();
+    const deuda = deudaTarjeta() + tarjetas().reduce((a, t) => a + sum(cargosPendientes(t.id, S.mes)), 0);
     const rp = resumenPagos(S.mes);
     const bal = I - G - T;
     const ben = gastos.filter(x => isBencina(x.categoria));
@@ -442,7 +497,7 @@ const VIEWS = {
       <div class="card"><h3>Tarjeta de crédito</h3><div class="kpis">
         <div class="kpi"><div class="mut small">Compras del mes</div><div class="v">${clp(credMes)}</div></div>
         <div class="kpi"><div class="mut small">Pagado este mes</div><div class="v">${clp(P)}</div></div>
-        <div class="kpi wide"><div class="mut small">Por pagar (compras − pagos registrados)</div><div class="v ${deuda > 0 ? 'bad' : ''}">${clp(deuda)}</div></div>
+        <div class="kpi wide"><div class="mut small">Por pagar (compras y cuotas del mes − pagos)</div><div class="v ${deuda > 0 ? 'bad' : ''}">${clp(deuda)}</div></div>
       </div>${detalleTarjetas(S.mes).map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
         <div class="mut small">Compras del mes ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
       <p class="mut small">Las compras con crédito cuentan como gasto el día que compras. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
@@ -471,13 +526,35 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Por pagar${r.variables ? ` (+${r.variables} sin monto fijo)` : ''}</div><div class="v ${r.porPagar ? 'bad' : ''}">${clp(r.porPagar)}</div></div>
         <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
       </div></div>
-      <button class="btn" data-act="nuevo-pago">+ Nuevo pago mensual</button>
-      ${r.lista.map(({ p, mov }) => { const [c, t] = estadoPago(p, S.mes, mov); return `<div class="row pago">
-        <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
-          <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${nombreTarjeta(p.tarjetaId) ? ' · ' + esc(nombreTarjeta(p.tarjetaId)) : ''}</span></div></button>
-        <div class="pago-der"><div class="am">${mov ? clp(mov.monto) : p.monto ? clp(p.monto) : 'Variable'}</div>
-          ${mov ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn" data-act="pagar" data-id="${esc(p.id)}">Pagar</button>`}</div>
-      </div>`; }).join('') || '<div class="empty">Agrega lo que pagas todos los meses: tarjeta de crédito, arriendo, cuentas…</div>'}`;
+      <button class="btn" data-act="nuevo-pago">+ Nuevo pago recurrente</button>
+      <label class="btn sec" style="color:var(--tx)">📄 Importar estado de cuenta<input type="file" accept="application/pdf,.pdf" id="imp-eecc" hidden></label>
+      ${r.lista.filter(x => !enTarjeta(x.p)).map(x => filaPago(x, S.mes)).join('')}
+      ${tarjetas().filter(t => pagoDeTarjeta(t.id)).map(t => { const fs = r.lista.filter(x => enTarjeta(x.p) && x.p.tarjetaId === t.id);
+        return fs.length ? `<div class="day">Cuotas de ${esc(t.nombre)}</div><p class="mut small">Se marcan solas al pagar el total de la tarjeta. Si pagas una parte, siguen pendientes.</p>${fs.map(x => filaPago(x, S.mes)).join('')}` : ''; }).join('')}
+      ${r.lista.length ? '' : '<div class="empty">Agrega lo que pagas todos los meses: tarjeta de crédito, arriendo, cuentas… O importa tu estado de cuenta.</div>'}`;
+  },
+  revision() {
+    const r = S.imp;
+    return `<form id="f-import" autocomplete="off">
+      <div class="card"><h3>${esc(r.nombre)}</h3><div class="kpis">
+        <div class="kpi"><div class="mut small">Total a pagar</div><div class="v">${clp(r.total)}</div></div>
+        <div class="kpi"><div class="mut small">Pagar hasta</div><div class="v">${esc(r.vence.split('-').reverse().join('/'))}</div></div>
+      </div>${tarjetaCampo({ id: 'x' })}
+      <div class="note" id="imp-res"></div></div>
+      <p class="mut small">Revisa cada línea y corrige lo que haga falta. Nada se guarda hasta que confirmes.</p>
+      ${r.lineas.map((l, i) => `<div class="imp" data-i="${i}">
+        <input name="desc" maxlength="60" value="${esc(l.desc)}" aria-label="Descripción">
+        <div class="two"><label>Fecha<input type="date" name="fecha" value="${esc(l.fecha)}"></label>
+          <label>Valor<input name="monto" inputmode="numeric" value="${l.monto > 0 ? fmtNum(l.monto) : ''}"></label></div>
+        <label>Qué hacer<select name="accion">
+          ${Object.entries({ cuotas: 'Compra en cuotas', compra: 'Compra de una sola vez', cargo: 'Cargo o interés', ignorar: 'No registrar' }).map(([k, v]) => `<option value="${k}" ${k === l.accion ? 'selected' : ''}>${v}</option>`).join('')}
+        </select></label>
+        <div class="two" data-cuotas><label>Cuota actual<input name="n" inputmode="numeric" value="${l.n}"></label><label>De un total de<input name="de" inputmode="numeric" value="${l.de}"></label></div>
+        ${l.aviso ? `<p class="small warn">⚠️ ${esc(l.aviso)}</p>` : ''}
+      </div>`).join('')}
+      <div class="err" id="err"></div>
+      <div class="acts"><button type="button" class="btn sec" data-act="cancelar-import">Cancelar</button><button class="btn">Confirmar y guardar</button></div>
+    </form>`;
   },
   atajos() {
     const ts = tpls();
@@ -497,14 +574,24 @@ const VIEWS = {
         <button class="btn danger" data-act="logout">Cerrar sesión</button>
         <p class="mut small">Al cerrar sesión se borran los datos de este dispositivo (siguen en tu cuenta). Úsalo si el dispositivo es compartido.</p></div>
       <div class="card"><h3>Mis tarjetas</h3>
-        ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(deudaTarjeta(t.id))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
+        ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(porPagarTarjeta(t.id, S.mes))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
         <button class="btn sec" data-act="nueva-tarjeta">+ Agregar tarjeta</button></div>
       <div class="card"><h3>Respaldo</h3><p class="mut small">Descarga una copia de tus datos (archivo JSON sin cifrar: guárdalo en un lugar seguro).</p>
         <button class="btn sec" data-act="exportar">Exportar respaldo</button>
         <label class="btn sec" style="color:var(--tx)">Importar respaldo<input type="file" accept="application/json,.json" id="imp" hidden></label></div>
-      <p class="mut small" style="text-align:center">${movs().length} movimientos · ${tpls().length} atajos · ${pagos().length} pagos mensuales</p>`;
+      <p class="mut small" style="text-align:center">${movs().length} movimientos · ${tpls().length} atajos · ${pagos().length} pagos recurrentes</p>`;
   },
 };
+function filaPago({ p, mov }, m) {
+  const [c, t] = estadoPago(p, m, mov), rest = cuotasRestantes(p), tar = nombreTarjeta(p.tarjetaId), saldo = mov ? saldoTarjeta(p, m) : 0, monto = saldo || (mov ? pagadoEnMes(p, m) : montoPago(p, m));
+  return `<div class="row pago">
+    <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
+      <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${tar && !enTarjeta(p) ? ' · ' + esc(tar) : ''}</span>
+      ${rest !== null ? `<span>${rest ? `Quedan ${rest} de ${p.cuotasTotal} cuotas` : `Última cuota · ${p.cuotasTotal} de ${p.cuotasTotal}`}</span>` : ''}</div></button>
+    <div class="pago-der"><div class="am">${monto ? clp(monto) : 'Variable'}</div>
+      ${mov && !saldo ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div>
+  </div>`;
+}
 function rowHTML(m) {
   const titulo = m.tipo === 'transferencia' ? (m.persona || 'Transferencia') : m.tipo === 'pago_tarjeta' ? 'Pago tarjeta' : (m.categoria || TIPOS[m.tipo]);
   const sub = [m.tipo === 'gasto' && MEDIOS[m.medio], nombreTarjeta(m.tarjetaId), m.litros && `${String(m.litros).replace('.', ',')} L`, m.km && `${fmtNum(m.km)} km`, m.nota].filter(Boolean).join(' · ');
@@ -570,11 +657,14 @@ function pagoFormHTML(r) {
   const tipos = { gasto: TIPOS.gasto, pago_tarjeta: TIPOS.pago_tarjeta, transferencia: TIPOS.transferencia };
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   return `<form id="f-pago" data-id="${esc(r.id || '')}" autocomplete="off">
-    <h2>${r.id ? 'Editar pago mensual' : 'Nuevo pago mensual'}</h2>
+    <h2>${r.id ? 'Editar pago recurrente' : 'Nuevo pago recurrente'}</h2>
     <label>Nombre<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Tarjeta de crédito, Arriendo"></label>
     <label>Día de vencimiento (1 a 31)<input name="dia" type="number" min="1" max="31" step="1" inputmode="numeric" required value="${esc(r.dia || '')}" placeholder="Ej: 5"></label>
     <div class="seg">${Object.entries(tipos).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
     <label>Monto (vacío si cambia cada mes)<input name="monto" class="big" inputmode="numeric" value="${r.monto ? fmtNum(r.monto) : ''}" placeholder="$0"></label>
+    <div class="two"><label>Próxima cuota<input name="cuotaProx" inputmode="numeric" value="${r.cuotasTotal ? r.cuotasTotal - cuotasRestantes(r) + 1 : ''}" placeholder="Opcional"></label>
+      <label>Total de cuotas<input name="cuotaTotal" inputmode="numeric" value="${r.cuotasTotal || ''}" placeholder="Opcional"></label></div>
+    <p class="mut small">Usa las cuotas si este pago tiene fin, como una compra en 12 cuotas. Se descuentan al marcarlo pagado.</p>
     <div data-show="gasto"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Cuentas"></label>
       <div class="seg">${Object.entries(MEDIOS).map(([k, v]) => `<label><input type="radio" name="medio" value="${k}" ${k === medio ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></div>
     ${tarjetaCampo(r)}
@@ -595,28 +685,112 @@ async function guardarPago(f) {
   const tipo = f.querySelector('input[name=tipo]:checked').value;
   const mesActual = hoy().slice(0, 7);
   const rec = { id, kind: 'pag', nombre: g('nombre') || 'Pago', dia, tipo, monto: parseMonto(g('monto')), desde: prev?.desde || (S.mes < mesActual ? S.mes : mesActual) };
+  if (prev?.estados) rec.estados = prev.estados;
+  const cTotal = parseMonto(g('cuotaTotal')), cProx = parseMonto(g('cuotaProx')) || 1;
+  if (cTotal) {
+    if (cProx > cTotal + 1) throw new Error('La próxima cuota no puede ser mayor que el total');
+    const pagadas = id ? movs().filter(x => x.pagoId === id).length : 0;
+    rec.cuotasTotal = cTotal; rec.cuotasPrevias = Math.max(0, cProx - 1 - pagadas);
+  }
   if (tipo === 'gasto') { rec.categoria = g('categoria') || 'Cuentas'; rec.medio = f.querySelector('input[name=medio]:checked')?.value || 'debito'; }
   if (tipo === 'transferencia') rec.persona = g('persona');
   if (g('nota')) rec.nota = g('nota');
   const tarjetaId = await resolverTarjeta(f, tipo);
   if (tarjetaId) rec.tarjetaId = tarjetaId;
-  await saveRec(rec); closeSheet(); renderMain(); toast('Pago mensual guardado');
+  await saveRec(rec); closeSheet(); renderMain(); toast('Pago recurrente guardado');
 }
 async function pagarPago(id) {
   const p = S.items.get(id); if (!p) return;
   const m = S.mes;
-  if (pagoMov(p, m)) { renderMain(); return; }
+  const saldo = pagoMov(p, m) ? saldoTarjeta(p, m) : 0;
+  if (pagoMov(p, m) && !saldo) { renderMain(); return; }
+  if (p.tipo === 'pago_tarjeta' && p.monto && !saldo && !p.estados?.[m]?.total && nombreTarjeta(p.tarjetaId)) {
+    const rec = { kind: 'mov', tipo: p.tipo, tarjetaId: p.tarjetaId, monto: p.monto, nota: p.nota || p.nombre, pagoId: p.id, pagoMes: m, fecha: m < hoy().slice(0, 7) ? vencimiento(p, m) : hoy() };
+    const r = await registrarPagoTarjeta(rec); renderMain();
+    toast(mensajePagoTarjeta(r), { label: 'Deshacer', fn: async () => { await eliminarConCuotas(r.mov); renderMain(); } }, 6000); return;
+  }
   const base = { tipo: p.tipo, categoria: p.categoria, medio: p.medio, persona: p.persona, tarjetaId: p.tarjetaId, nota: p.nota || p.nombre, pagoId: p.id, pagoMes: m };
   Object.keys(base).forEach(k => base[k] === undefined && delete base[k]);
   // Un mes pasado queda con su fecha de vencimiento, para que el gasto caiga en ese mes
   const fecha = m < hoy().slice(0, 7) ? vencimiento(p, m) : hoy();
-  if (!p.monto) {
-    const deuda = p.tipo === 'pago_tarjeta' ? deudaTarjeta(nombreTarjeta(p.tarjetaId) ? p.tarjetaId : undefined) : 0;
+  if (!p.monto || p.estados?.[m]?.total || saldo) {
+    const conTarjeta = !!nombreTarjeta(p.tarjetaId);
+    const deuda = p.tipo !== 'pago_tarjeta' ? 0 : saldo || p.estados?.[m]?.total || (conTarjeta ? porPagarTarjeta(p.tarjetaId, m) : deudaTarjeta());
     abrirForm({ ...base, fecha, monto: deuda > 0 ? deuda : 0 }); return;
   }
   const mov = await saveRec({ kind: 'mov', fecha, monto: p.monto, ...base });
   renderMain();
   toast(`${p.nombre}: ${clp(p.monto)} registrado`, { label: 'Deshacer', fn: async () => { await delRec(mov.id); renderMain(); } }, 6000);
+}
+// ---------- Importar estado de cuenta
+async function cargarEstado(file, password) {
+  S.impFile = file;
+  let filas;
+  toast('Leyendo el estado de cuenta…');
+  try { filas = await FinImport.leerFilas(await file.arrayBuffer(), password); }
+  catch (ex) {
+    if (ex?.name !== 'PasswordException') { console.error(ex); throw new Error('No se pudo leer el PDF. Revisa que sea el archivo original del banco.'); }
+    openSheet(`<form id="f-clave"><h2>PDF con contraseña</h2><p class="mut small">La clave se usa solo para abrir el archivo en este dispositivo y no se guarda.</p>
+      <label>Contraseña del PDF<input type="password" name="clave" required autocomplete="off"></label>
+      <div class="err" id="err">${password ? 'Contraseña incorrecta.' : ''}</div>
+      <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Abrir</button></div></form>`);
+    return;
+  }
+  const r = FinImport.analizar(filas);
+  if (!r) throw new Error('No reconozco este formato. Por ahora se leen CMR Falabella y BCI; agrega tus pagos a mano.');
+  // Reimportar: lo que ya existe queda sin registrar, para no duplicarlo
+  for (const l of r.lineas) {
+    if (l.accion === 'cuotas' && pagos().some(p => p.cuotasTotal === l.de && p.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un pago en cuotas igual. Se dejó sin registrar para no duplicarlo.'; }
+    else if ((l.accion === 'compra' || l.accion === 'cargo') && movs().some(x => esCredito(x) && x.fecha === l.fecha && x.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un movimiento igual. Se dejó sin registrar para no duplicarlo.'; }
+  }
+  closeSheet(); S.imp = r; S.view = 'revision'; renderMain(); window.scrollTo(0, 0);
+  const f = $('#f-import'), igual = tarjetas().find(t => r.clave.test(t.nombre));
+  f.elements.tarjetaId.value = igual ? igual.id : '__nueva';
+  if (!igual) f.elements.tarjetaNueva.value = r.nombre;
+  actualizarImport(f);
+}
+function leerLinea(el) {
+  const v = k => el.querySelector(`[name=${k}]`).value.trim();
+  return { desc: v('desc'), fecha: v('fecha'), monto: parseMonto(v('monto')), accion: v('accion'), n: parseMonto(v('n')), de: parseMonto(v('de')) };
+}
+function actualizarImport(f) {
+  const tj = f.querySelector('[data-tarjeta-nueva]'); if (tj) tj.hidden = f.elements.tarjetaId.value !== '__nueva';
+  let suma = 0, cuantas = 0, yaEstan = 0;
+  f.querySelectorAll('.imp').forEach(el => {
+    const l = leerLinea(el);
+    el.classList.toggle('off', l.accion === 'ignorar');
+    el.querySelector('[data-cuotas]').hidden = l.accion !== 'cuotas';
+    if (l.accion !== 'ignorar') { cuantas++; if (!(l.accion === 'cuotas' && l.n === 0)) suma += l.monto; }
+    else if (S.imp.lineas[+el.dataset.i].existe) { yaEstan++; if (l.n !== 0) suma += l.monto; } // ya registradas: también cuentan para cuadrar con el banco
+  });
+  const dif = suma - S.imp.total;
+  $('#imp-res').innerHTML = `${cuantas} línea${cuantas === 1 ? '' : 's'} por registrar${yaEstan ? ` · ${yaEstan} ya registrada${yaEstan === 1 ? '' : 's'}` : ''} · suma <b>${clp(suma)}</b><br>${dif === 0 ? '<span class="ok">✓ Coincide con el total del banco</span>' : `<span class="warn">⚠️ Diferencia con el total del banco: ${clp(dif)}</span>`}`;
+}
+async function guardarImport(f) {
+  const r = S.imp, lineas = [...f.querySelectorAll('.imp')].map(leerLinea);
+  for (const l of lineas) {
+    if (l.accion === 'ignorar') continue;
+    if (l.monto <= 0) throw new Error(`Falta el valor de "${l.desc}"`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(l.fecha)) throw new Error(`Falta la fecha de "${l.desc}"`);
+    if (l.accion === 'cuotas' && !(l.de >= 1 && l.n <= l.de)) throw new Error(`Revisa las cuotas de "${l.desc}"`);
+  }
+  const tarjetaId = await resolverTarjeta(f, 'pago_tarjeta');
+  if (!tarjetaId) throw new Error('Elige a qué tarjeta corresponde este estado de cuenta');
+  const dia = +r.vence.slice(8, 10);
+  const q = pagoDeTarjeta(tarjetaId) || { kind: 'pag', nombre: 'Pago ' + nombreTarjeta(tarjetaId), dia, tipo: 'pago_tarjeta', tarjetaId, monto: 0, desde: r.mes };
+  await saveRec({ ...q, desde: q.desde < r.mes ? q.desde : r.mes, estados: { ...(q.estados || {}), [r.mes]: { total: r.total, vence: r.vence } } });
+  let n = 0;
+  for (let i = 0; i < lineas.length; i++) {
+    const l = lineas[i]; if (l.accion === 'ignorar') continue;
+    if (l.accion === 'cuotas') {
+      await saveRec({ kind: 'pag', nombre: l.desc, dia, tipo: 'gasto', categoria: 'Compras', medio: 'credito', tarjetaId, monto: l.monto, cuotasTotal: l.de, cuotasPrevias: Math.max(0, l.n - 1), desde: l.n === 0 ? (r.lineas[i].primerMes || shiftMes(r.mes, 1)) : r.mes });
+    } else {
+      await saveRec({ kind: 'mov', tipo: 'gasto', categoria: l.accion === 'cargo' ? 'Cuentas' : 'Compras', medio: 'credito', tarjetaId, monto: l.monto, fecha: l.fecha, nota: l.desc });
+    }
+    n++;
+  }
+  S.mes = r.mes; S.imp = null; S.view = 'pagos'; renderMain(); window.scrollTo(0, 0);
+  toast(`${n} línea${n === 1 ? '' : 's'} guardada${n === 1 ? '' : 's'}`);
 }
 function abrirForm(r = {}, isTpl = false) { openSheet(formHTML(r, isTpl)); actualizarForm($('#f-mov')); }
 function actualizarForm(f) {
@@ -650,16 +824,20 @@ async function guardarForm(f) {
     closeSheet(); toast('Atajo guardado'); renderMain(); return;
   }
   const rec = { id, kind: 'mov', fecha: g('fecha') || hoy(), ...base };
-  const pagoMes = f.dataset.pagoMes;
+  if (id && S.items.get(id)?.porPago) rec.porPago = S.items.get(id).porPago;
+  let pagoMes = f.dataset.pagoMes;
   if (f.dataset.pagoId && pagoMes) { rec.pagoId = f.dataset.pagoId; rec.pagoMes = pagoMes; }
   if (tipo === 'gasto' && isBencina(base.categoria)) { const l = parseDec(g('litros')), km = parseMonto(g('km')); if (l) rec.litros = l; if (km) rec.km = km; }
-  await saveRec(rec);
+  const pagoT = !id && tipo === 'pago_tarjeta' && rec.tarjetaId ? await registrarPagoTarjeta(rec) : null;
+  if (pagoT) pagoMes = pagoT.mov.pagoMes || pagoMes; else await saveRec(rec);
   if (f.comoAtajo?.checked) {
     const t = { kind: 'tpl', nombre: g('nombreAtajo') || base.persona || base.categoria || TIPOS[tipo], ...base };
     if (isBencina(base.categoria)) t.monto = 0;
     await saveRec(t);
   }
-  closeSheet(); S.mes = pagoMes || rec.fecha.slice(0, 7); renderMain(); toast(id ? 'Movimiento actualizado' : 'Movimiento guardado');
+  closeSheet(); S.mes = pagoMes || rec.fecha.slice(0, 7); renderMain();
+  if (pagoT) toast(mensajePagoTarjeta(pagoT), { label: 'Deshacer', fn: async () => { await eliminarConCuotas(pagoT.mov); renderMain(); } }, 6000);
+  else toast(id ? 'Movimiento actualizado' : 'Movimiento guardado');
 }
 async function usarAtajo(id) {
   const t = S.items.get(id); if (!t) return;
@@ -667,7 +845,10 @@ async function usarAtajo(id) {
   const base = { tipo: t.tipo, categoria: t.categoria, medio: t.medio, persona: t.persona, tarjetaId: t.tarjetaId, nota: t.nota };
   Object.keys(base).forEach(k => base[k] === undefined && delete base[k]);
   if (!t.monto) { abrirForm({ ...base, fecha: hoy() }); return; }
-  const m = await saveRec({ kind: 'mov', fecha: hoy(), monto: t.monto, ...base });
+  const rec = { kind: 'mov', fecha: hoy(), monto: t.monto, ...base };
+  const pagoT = t.tipo === 'pago_tarjeta' && t.tarjetaId ? await registrarPagoTarjeta(rec) : null;
+  if (pagoT) { S.mes = pagoT.mov.pagoMes || hoy().slice(0, 7); renderMain(); toast(mensajePagoTarjeta(pagoT), { label: 'Deshacer', fn: async () => { await eliminarConCuotas(pagoT.mov); renderMain(); } }, 6000); return; }
+  const m = await saveRec(rec);
   S.mes = hoy().slice(0, 7); renderMain();
   toast(`${t.nombre}: ${clp(t.monto)} registrado`, { label: 'Deshacer', fn: async () => { await delRec(m.id); renderMain(); } }, 6000);
 }
@@ -691,16 +872,17 @@ document.addEventListener('click', async e => {
       case 'editar': abrirForm(S.items.get(el.dataset.id)); break;
       case 'editar-atajo': abrirForm(S.items.get(el.dataset.id), true); break;
       case 'usar': await usarAtajo(el.dataset.id); break;
+      case 'cancelar-import': S.imp = null; S.view = 'pagos'; renderMain(); break;
       case 'nueva-tarjeta': abrirTarjetaForm(); break;
       case 'editar-tarjeta': abrirTarjetaForm(S.items.get(el.dataset.id)); break;
       case 'borrar-tarjeta': if (await confirmar('¿Eliminar tarjeta?', 'Sus compras y pagos se conservan, pero quedan como "Sin tarjeta asignada".', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
       case 'nuevo-pago': abrirPagoForm(); break;
       case 'editar-pago': abrirPagoForm(S.items.get(el.dataset.id)); break;
       case 'pagar': await pagarPago(el.dataset.id); break;
-      case 'borrar-pago': if (await confirmar('¿Eliminar pago mensual?', 'Los movimientos ya registrados no se borran.', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
+      case 'borrar-pago': if (await confirmar('¿Eliminar pago recurrente?', 'Los movimientos ya registrados no se borran.', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
       case 'borrar-mov': {
-        const m = S.items.get(el.dataset.id); closeSheet(); await delRec(m.id); renderMain();
-        toast('Movimiento eliminado', { label: 'Deshacer', fn: async () => { await saveRec(m); renderMain(); } }, 6000); break;
+        const m = S.items.get(el.dataset.id); closeSheet(); const borrados = await eliminarConCuotas(m); renderMain();
+        toast(borrados.length > 1 ? `Pago eliminado y ${borrados.length - 1} cuota${borrados.length === 2 ? '' : 's'} sin marcar` : 'Movimiento eliminado', { label: 'Deshacer', fn: async () => { for (const x of borrados) await saveRec(x); renderMain(); } }, 6000); break;
       }
       case 'borrar-atajo': if (await confirmar('¿Eliminar atajo?', 'Los movimientos ya registrados no se borran.', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
       case 'sync': await sync(); renderMain(); break;
@@ -733,6 +915,8 @@ document.addEventListener('submit', async e => {
     if (f.id === 'f-mov') await guardarForm(f);
     else if (f.id === 'f-pago') await guardarPago(f);
     else if (f.id === 'f-tarjeta') await guardarTarjeta(f);
+    else if (f.id === 'f-import') await guardarImport(f);
+    else if (f.id === 'f-clave') { const clave = f.clave.value; closeSheet(); await cargarEstado(S.impFile, clave); }
     else if (f.id === 'f-login') { if (btn) btn.textContent = 'Ingresando…'; S.loginMsg = ''; await ingresar(f.email.value.trim(), f.pw.value); }
     else if (f.id === 'f-mfa') { if (btn) btn.textContent = 'Verificando…'; await verificarCodigo(f.code.value); }
     else if (f.id === 'f-pw') {
@@ -748,9 +932,13 @@ document.addEventListener('submit', async e => {
 
 document.addEventListener('change', async e => {
   const f = e.target.closest('#f-mov, #f-pago'); if (f) actualizarForm(f);
+  const fi = e.target.closest('#f-import'); if (fi) actualizarImport(fi);
+  if (e.target.id === 'imp-eecc' && e.target.files[0]) { const a = e.target.files[0]; e.target.value = ''; try { await cargarEstado(a); } catch (ex) { toast(ex.message, null, 6000); } }
   if (e.target.id === 'imp' && e.target.files[0]) { try { await importar(e.target.files[0]); } catch (ex) { toast(ex.message); } e.target.value = ''; }
 });
 document.addEventListener('input', e => {
+  const fi = e.target.closest('#f-import');
+  if (fi) { if (e.target.name === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; } actualizarImport(fi); return; }
   const f = e.target.closest('#f-mov, #f-pago'); if (!f) return;
   if (e.target.name === 'monto' || e.target.name === 'km') { const n = parseMonto(e.target.value); e.target.value = n ? fmtNum(n) : ''; }
   if (e.target.name === 'categoria') actualizarForm(f);

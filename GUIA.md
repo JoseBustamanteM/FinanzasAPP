@@ -8,7 +8,7 @@ Toma unos 20 minutos y es gratis. Conviene hacerlo desde un computador.
 2. **Doble autenticación obligatoria (2FA).** Además de la contraseña, se pide un código de 6 dígitos de una app de autenticación (Google Authenticator, Microsoft Authenticator, etc.). Se configura la primera vez que la persona entra.
 3. **La base de datos exige el 2FA.** Las reglas de Supabase solo entregan datos a sesiones que pasaron el código. Aunque alguien robe una contraseña, sin el celular de esa persona no ve nada.
 4. **Cada persona ve solo lo suyo.** Las reglas RLS separan los datos por usuario.
-5. **Conexión cifrada** (HTTPS) y sin librerías externas: el navegador bloquea cualquier script de terceros.
+5. **Conexión cifrada** (HTTPS) y sin scripts de terceros: el navegador los bloquea. La única librería (pdf.js, para leer estados de cuenta) va alojada junto a la app, y los PDF se procesan en tu dispositivo sin enviarse a ningún servidor.
 6. **Dispositivos compartidos.** "Cerrar sesión" borra los datos de ese dispositivo. Además, si entra otra persona, la app borra primero lo que había del usuario anterior.
 
 > Nota: tú, como administrador del proyecto Supabase, podrías ver los datos desde el panel (no van cifrados con una clave personal). Cuida la contraseña de tu cuenta de Supabase y actívale también 2FA (en tu perfil de supabase.com).
@@ -67,7 +67,8 @@ En los demás dispositivos, cada vez que la persona inicia sesión: correo, cont
 
 - **+** registra un movimiento: gasto, ingreso, transferencia o pago de tarjeta.
 - **Atajos:** lo que repites queda a un toque. Si el atajo tiene monto fijo, se registra al instante y se puede deshacer.
-- **Pagos:** agrega lo que pagas todos los meses (tarjeta, arriendo, cuentas) con su día de vencimiento. En cada mes ves qué está pendiente o atrasado; al tocar *Pagar* se crea el movimiento. Para deshacerlo, toca *✓ Pagado* y elimina ese movimiento.
+- **Pagos:** agrega tus pagos recurrentes (tarjeta, arriendo, cuentas) con su día de vencimiento y, si tienen fin, sus cuotas. En cada mes ves qué está pendiente o atrasado; al tocar *Pagar* se crea el movimiento y se descuenta la cuota. Para deshacerlo, toca *✓ Pagado* y elimina ese movimiento.
+- **Importar estado de cuenta:** en Pagos, sube el PDF de CMR Falabella o BCI, revisa cada línea y confirma. Al pagar el total de la tarjeta, sus cuotas del mes quedan pagadas; si pagas una parte, siguen pendientes. **No subas tus PDF al repositorio.**
 - **Tarjeta de crédito:** agrega tus tarjetas en Ajustes (o al registrar una compra) y registra las compras como *Gasto → Crédito*, eligiendo la tarjeta. En Inicio ves cuánto debes en cada una. Cuando pagues el estado de cuenta, usa *Pago tarjeta*; ese pago no se cuenta dos veces.
 - **Bencina:** si anotas los litros y el kilometraje llenando el estanque completo, la app calcula el rendimiento en km/l.
 - **Sin internet** también funciona: los cambios se sincronizan cuando vuelve la conexión.

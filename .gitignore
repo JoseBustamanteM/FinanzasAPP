@@ -1,0 +1,3 @@
+# Los estados de cuenta tienen datos personales: nunca deben subirse
+*.pdf
+*.PDF
