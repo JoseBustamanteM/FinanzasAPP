@@ -144,6 +144,45 @@ const montoPago = (p, m) => p.estados?.[m]?.total || p.monto || (p.tipo === 'pag
 const mesDePagoCompra = x => x.factMes || (x.fecha || '').slice(0, 7);
 const comprasTarjeta = (clave, m) => movs().filter(x => esCredito(x) && !x.pagoId && claveTarjeta(x) === clave && mesDePagoCompra(x) === m).sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
 const esPagoTC = p => p.tipo === 'pago_tarjeta' || (p.tipo === 'gasto' && p.medio === 'credito');
+const mismoNombre = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+const fijoIgual = (desc, tarjetaId) => pagos().find(p => esCargoTarjeta(p) && !p.cuotasTotal && mismoNombre(p.nombre, desc) && (!tarjetaId || p.tarjetaId === tarjetaId));
+// Personas y división de gastos. Lo que te deben no toca el balance hasta que llega el dinero.
+const personas = () => [...S.items.values()].filter(x => x.kind === 'per').sort((a, b) => a.nombre.localeCompare(b.nombre));
+const nombrePersona = id => { const t = id && S.items.get(id); return t && t.kind === 'per' ? t.nombre : ''; };
+const parteMonto = (parte, total) => (parte.pct ? Math.round(total * parte.pct / 100) : parte.monto || 0);
+function partesDe(p, m) {
+  if (p.divMes && m in p.divMes) return p.divMes[m];
+  const vigente = (p.divs || []).filter(d => d.desde <= m).sort((a, b) => a.desde.localeCompare(b.desde)).pop();
+  return vigente ? vigente.partes : [];
+}
+const totalDivPago = (p, m) => pagoMov(p, m)?.monto || montoPago(p, m);
+const textoDiv = (partes, total) => partes.filter(x => nombrePersona(x.personaId)).map(x => `${nombrePersona(x.personaId)} te debe ${clp(parteMonto(x, total))}`).join(' · ');
+function cargosDivididos(hasta) {
+  const out = [];
+  for (const x of movs()) {
+    const mes = mesDePagoCompra(x);
+    if (x.div && mes <= hasta) for (const d of x.div) out.push({ personaId: d.personaId, mes, nombre: x.nota || x.categoria || 'Compra', monto: parteMonto(d, x.monto), pct: d.pct, id: x.id });
+  }
+  for (const p of pagos()) {
+    const inicios = [...(p.divs || []).map(d => d.desde), ...Object.keys(p.divMes || {})].sort();
+    if (!inicios.length) continue;
+    const fin = p.cuotasTotal && ultimoMesCuota(p) < hasta ? ultimoMesCuota(p) : hasta;
+    for (let mes = inicios[0] > p.desde ? inicios[0] : p.desde; mes <= fin; mes = shiftMes(mes, 1)) {
+      const total = totalDivPago(p, mes), nombre = p.cuotasTotal ? `${p.nombre} · Cuota ${cuotaDelMes(p, mes)} de ${p.cuotasTotal}` : p.nombre;
+      for (const d of partesDe(p, mes)) out.push({ personaId: d.personaId, mes, nombre, monto: parteMonto(d, total), pct: d.pct, id: p.id });
+    }
+  }
+  return out;
+}
+function cuentaPersonas(m) {
+  const cargos = cargosDivididos(m), abonos = movs().filter(x => x.reembolso && x.personaId && (x.fecha || '').slice(0, 7) <= m);
+  return personas().map(t => {
+    const suyos = cargos.filter(c => c.personaId === t.id), pagos = abonos.filter(a => a.personaId === t.id);
+    const delMes = suyos.filter(c => c.mes === m), abonosMes = pagos.filter(a => a.fecha.slice(0, 7) === m);
+    const previo = sum(suyos.filter(c => c.mes < m)) - sum(pagos.filter(a => a.fecha.slice(0, 7) < m));
+    return { t, delMes, abonosMes, previo, total: previo + sum(delMes) - sum(abonosMes) };
+  });
+}
 const pagoDeTarjeta = t => pagos().find(q => q.tipo === 'pago_tarjeta' && q.tarjetaId === t);
 const esCargoTarjeta = p => p.tipo === 'gasto' && p.medio === 'credito' && !!nombreTarjeta(p.tarjetaId);
 // Cuotas y cargos que se pagan junto con la tarjeta: no se suman aparte para no contarlos dos veces
@@ -364,7 +403,7 @@ async function importar(file) {
   if (j.app !== 'mis-finanzas' || j.v !== 2 || !Array.isArray(j.items)) throw new Error('El archivo no es un respaldo válido');
   let n = 0;
   for (const o of j.items) {
-    if (!o || !o.id || !['mov', 'tpl', 'pag', 'tar'].includes(o.kind)) continue;
+    if (!o || !o.id || !['mov', 'tpl', 'pag', 'tar', 'per'].includes(o.kind)) continue;
     const cur = S.items.get(o.id);
     if (cur && (cur.mod || 0) >= (o.mod || 0)) continue;
     await saveRaw(o); n++;
@@ -473,13 +512,13 @@ function rendimientos() {
 const VIEWS = {
   inicio() {
     const ms = delMes(S.mes);
-    const gastos = ms.filter(x => x.tipo === 'gasto'), ingresos = ms.filter(x => x.tipo === 'ingreso'),
+    const gastos = ms.filter(x => x.tipo === 'gasto'), ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
       transf = ms.filter(x => x.tipo === 'transferencia'), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
     const deuda = deudaTarjeta() + tarjetas().reduce((a, t) => a + sum(cargosPendientes(t.id, S.mes)), 0);
     const rp = resumenPagos(S.mes);
-    const bal = I - G - T;
+    const R = sum(reembolsos), bal = I + R - G - T;
     const ben = gastos.filter(x => isBencina(x.categoria));
     const litros = ben.reduce((a, x) => a + (+x.litros || 0), 0);
     const rend = rendimientos();
@@ -491,6 +530,7 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Ingresos</div><div class="v">${clp(I)}</div></div>
         <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div></div>
         <div class="kpi"><div class="mut small">Movimientos</div><div class="v">${ms.length}</div></div>
+        ${R ? `<div class="kpi wide"><div class="mut small">Reembolsos recibidos</div><div class="v">${clp(R)}</div></div>` : ''}
       </div></div>
       ${rp.lista.length ? `<div class="card"><h3>Pagos del mes</h3>
         <p class="small">${rp.pend.length ? `<b>${rp.pend.length} pendiente${rp.pend.length === 1 ? '' : 's'}</b>${rp.porPagar ? ` · ${clp(rp.porPagar)}` : ''}${rp.variables ? ` · ${rp.variables} sin monto fijo` : ''}` : '<span class="ok">✓ Todos pagados</span>'}</p>
@@ -535,11 +575,11 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Por pagar${r.variables ? ` (+${r.variables} sin monto fijo)` : ''}</div><div class="v ${r.porPagar ? 'bad' : ''}">${clp(r.porPagar)}</div></div>
         <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
       </div></div>
-      <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
+      <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes', medeben: 'Me deben' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
       ${vista === 'tarjetas' ? `<button class="btn" data-act="nueva-compra">+ Agregar compra con tarjeta</button>
         <label class="btn sec" style="color:var(--tx)">📄 Importar estado de cuenta<input type="file" accept="application/pdf,.pdf" id="imp-eecc" hidden></label>
         ${vistaTarjetas(r.lista, S.mes)}`
-      : `<button class="btn" data-act="nuevo-pago">+ Nuevo pago recurrente</button>
+      : vista === 'medeben' ? vistaMeDeben(S.mes) : `<button class="btn" data-act="nuevo-pago">+ Nuevo pago recurrente</button>
         ${recurrentes.map(x => filaPago(x, S.mes)).join('') || '<div class="empty">Agrega lo que pagas todos los meses sin tarjeta de crédito: arriendo, luz, internet…</div>'}`}`;
   },
   revision() {
@@ -560,7 +600,7 @@ const VIEWS = {
         <div class="two"><label>Fecha<input type="date" name="fecha" value="${esc(l.fecha)}"></label>
           <label>Valor<input name="monto" inputmode="numeric" value="${l.monto > 0 ? fmtNum(l.monto) : ''}"></label></div>
         <label>Qué hacer<select name="accion">
-          ${Object.entries({ cuotas: 'Compra en cuotas', compra: 'Compra de una sola vez', cargo: 'Cargo o interés', ignorar: 'No registrar' }).map(([k, v]) => `<option value="${k}" ${k === l.accion ? 'selected' : ''}>${v}</option>`).join('')}
+          ${Object.entries({ cuotas: 'Compra en cuotas', compra: 'Compra de una sola vez', fijo: 'Pago fijo mensual', cargo: 'Cargo o interés', ignorar: 'No registrar' }).map(([k, v]) => `<option value="${k}" ${k === l.accion ? 'selected' : ''}>${v}</option>`).join('')}
         </select></label>
         <div class="two" data-cuotas><label>Cuota actual<input name="n" inputmode="numeric" value="${l.n}"></label><label>De un total de<input name="de" inputmode="numeric" value="${l.de}"></label></div>
         ${l.aviso ? `<p class="small warn">⚠️ ${esc(l.aviso)}</p>` : ''}
@@ -589,6 +629,9 @@ const VIEWS = {
       <div class="card"><h3>Mis tarjetas</h3>
         ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(porPagarTarjeta(t.id, S.mes))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
         <button class="btn sec" data-act="nueva-tarjeta">+ Agregar tarjeta</button></div>
+      <div class="card"><h3>Personas</h3>
+        ${personas().map(t => `<button class="row" data-act="editar-persona" data-id="${esc(t.id)}"><div class="ic">👤</div><div class="tx"><b>${esc(t.nombre)}</b></div></button>`).join('') || '<p class="mut small">Agrega a quienes comparten gastos contigo. Solo se guarda el nombre.</p>'}
+        <button class="btn sec" data-act="nueva-persona">+ Agregar persona</button></div>
       <div class="card"><h3>Respaldo</h3><p class="mut small">Descarga una copia de tus datos (archivo JSON sin cifrar: guárdalo en un lugar seguro).</p>
         <button class="btn sec" data-act="exportar">Exportar respaldo</button>
         <label class="btn sec" style="color:var(--tx)">Importar respaldo<input type="file" accept="application/json,.json" id="imp" hidden></label></div>
@@ -596,9 +639,128 @@ const VIEWS = {
   },
 };
 function filaCompra(x) {
-  return `<button class="row" data-act="editar" data-id="${esc(x.id)}"><div class="ic">${x.cargo ? '📄' : (CAT_ICON[x.categoria] || ICON.gasto)}</div>
-    <div class="tx"><b>${esc(x.nota || x.categoria || 'Compra')}</b><span>${esc((x.fecha || '').split('-').reverse().join('/'))}</span></div>
-    <div class="am">${clp(x.monto)}</div></button>`;
+  const div = x.div ? textoDiv(x.div, x.monto) : '';
+  return `<div class="row pago"><button class="pago-info" data-act="editar" data-id="${esc(x.id)}"><div class="ic">${x.cargo ? '📄' : (CAT_ICON[x.categoria] || ICON.gasto)}</div>
+    <div class="tx"><b>${esc(x.nota || x.categoria || 'Compra')}</b><span>${esc((x.fecha || '').split('-').reverse().join('/'))}</span>${div ? `<span class="ok">${esc(div)}</span>` : ''}</div></button>
+    <div class="pago-der"><div class="am">${clp(x.monto)}</div><button class="pago-btn sec" data-act="dividir-mov" data-id="${esc(x.id)}" aria-label="Dividir" title="Dividir">÷</button></div></div>`;
+}
+function vistaMeDeben(m) {
+  const cuentas = cuentaPersonas(m), total = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
+  const conMovimiento = cuentas.filter(c => c.total || c.delMes.length || c.abonosMes.length);
+  return `<div class="card"><div class="kpi"><div class="mut small">Me deben en total</div><div class="v ${total ? 'ok' : ''}">${clp(total)}</div></div>
+      <p class="mut small">No cuenta en tu balance hasta que registres que te pagaron. Para dividir algo, toca ÷ en una compra o una cuota.</p></div>
+    <button class="btn sec" data-act="nueva-persona">+ Agregar persona</button>
+    ${conMovimiento.map(c => `<section class="bloque"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'ok' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
+      ${c.previo ? `<div class="bar-l small"><span>${c.previo > 0 ? 'Pendiente de meses anteriores' : 'A favor de meses anteriores'}</span><span>${clp(Math.abs(c.previo))}</span></div>` : ''}
+      ${c.delMes.map(d => `<div class="bar-l small"><span>${esc(d.nombre)}${d.pct ? ` (${String(d.pct).replace('.', ',')}%)` : ''}</span><span>${clp(d.monto)}</span></div>`).join('')}
+      ${c.abonosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💰</div><div class="tx"><b>Pago recibido</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
+      ${c.total > 0 ? `<button class="btn" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago recibido</button>` : ''}</section>`).join('') || '<div class="empty">Nadie te debe en este mes.</div>'}`;
+}
+// ---------- Dividir un gasto
+function filaDividir(parte, modo) {
+  const ps = personas(), sel = parte?.personaId || (ps.length ? ps[0].id : '__nueva');
+  const valor = !parte ? '' : modo === 'pct' ? String(parte.pct || '').replace('.', ',') : fmtNum(parte.monto);
+  return `<div class="div-fila"><div class="two"><label>Persona<select name="persona">
+      ${ps.map(t => `<option value="${esc(t.id)}" ${t.id === sel ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+      <option value="__nueva" ${sel === '__nueva' ? 'selected' : ''}>+ Nueva persona…</option></select></label>
+    <label>Le corresponde<input name="valor" inputmode="decimal" value="${esc(valor)}"></label></div>
+    <div data-nueva><label>Nombre<input name="nombre" maxlength="40" placeholder="Ej: Ana"></label></div></div>`;
+}
+function abrirDividir(kind, id) {
+  const r = S.items.get(id); if (!r) return;
+  const m = S.mes, total = kind === 'mov' ? r.monto : totalDivPago(r, m), partes = kind === 'mov' ? r.div || [] : partesDe(r, m);
+  const modo = partes.length && !partes[0].pct ? 'monto' : 'pct';
+  const alcance = kind === 'mov' || !partes.length ? '' : (r.divMes && m in r.divMes ? 'mes' : 'todos');
+  openSheet(`<form id="f-dividir" data-kind="${kind}" data-id="${esc(id)}" data-mes="${m}" data-total="${total}" autocomplete="off">
+    <h2>Dividir ${esc(r.nota || r.nombre || r.categoria || 'gasto')}</h2>
+    <p class="mut small">Total: <b>${total ? clp(total) : 'monto variable'}</b>. A tu tarjeta le sigues debiendo el total; aquí solo anotas lo que te deben.</p>
+    ${kind === 'pag' ? `<p class="small" style="margin-top:12px"><b>¿Qué quieres dividir?</b></p>
+      <div class="seg"><label><input type="radio" name="alcance" value="todos" ${alcance === 'todos' ? 'checked' : ''}><span>Mes a mes, desde ${esc(mesLabel(m))}</span></label>
+        <label><input type="radio" name="alcance" value="mes" ${alcance === 'mes' ? 'checked' : ''}><span>Solo ${esc(mesLabel(m))}</span></label></div>` : ''}
+    <div class="seg"><label><input type="radio" name="modo" value="pct" ${modo === 'pct' ? 'checked' : ''}><span>Porcentaje</span></label>
+      <label><input type="radio" name="modo" value="monto" ${modo === 'monto' ? 'checked' : ''}><span>Monto</span></label></div>
+    <div id="div-filas">${(partes.length ? partes : [null]).map(x => filaDividir(x, modo)).join('')}</div>
+    <button type="button" class="link" data-act="div-fila">+ Otra persona</button>
+    <div class="note" id="div-res"></div>
+    <div class="err" id="err"></div>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${partes.length ? '<button type="button" class="btn danger" data-act="div-quitar">Quitar división</button>' : ''}</form>`);
+  actualizarDividir($('#f-dividir'));
+}
+function leerDividir(f) {
+  const modo = f.querySelector('input[name=modo]:checked').value;
+  return { modo, filas: [...f.querySelectorAll('.div-fila')].map(el => {
+    const texto = el.querySelector('[name=valor]').value.trim();
+    return { el, persona: el.querySelector('[name=persona]').value, nombre: el.querySelector('[name=nombre]').value.trim(), valor: modo === 'pct' ? parseDec(texto) || 0 : parseMonto(texto) };
+  }) };
+}
+function actualizarDividir(f) {
+  const { modo, filas } = leerDividir(f), total = +f.dataset.total;
+  filas.forEach(x => {
+    x.el.querySelector('[data-nueva]').hidden = x.persona !== '__nueva';
+    x.el.querySelector('[name=valor]').placeholder = modo === 'pct' ? 'Ej: 50' : 'Ej: $20.000';
+  });
+  const deben = filas.reduce((a, x) => a + (modo === 'pct' ? Math.round(total * x.valor / 100) : x.valor), 0);
+  $('#div-res').innerHTML = !total && modo === 'pct' ? 'Se calculará con el monto de cada mes.' : `Te deben <b>${clp(deben)}</b> · Tu parte <b>${clp(total - deben)}</b>`;
+}
+async function guardarDividir(f, quitar) {
+  const kind = f.dataset.kind, r = S.items.get(f.dataset.id), m = f.dataset.mes, total = +f.dataset.total;
+  const alcance = f.querySelector('input[name=alcance]:checked')?.value;
+  if (kind === 'pag' && !alcance) throw new Error('Elige si quieres dividir mes a mes o solo este mes');
+  const partes = [];
+  if (!quitar) {
+    const { modo, filas } = leerDividir(f), llenas = filas.filter(x => x.valor > 0);
+    if (!llenas.length) throw new Error('Indica cuánto le corresponde a cada persona');
+    if (modo === 'pct' && llenas.reduce((a, x) => a + x.valor, 0) > 100) throw new Error('Los porcentajes no pueden sumar más de 100');
+    if (modo === 'monto' && total && llenas.reduce((a, x) => a + x.valor, 0) > total) throw new Error('Los montos no pueden sumar más que el total');
+    if (llenas.some(x => x.persona === '__nueva' && !x.nombre)) throw new Error('Escribe el nombre de la persona');
+    for (const x of llenas) {
+      let personaId = x.persona;
+      if (personaId === '__nueva') personaId = (personas().find(t => mismoNombre(t.nombre, x.nombre)) || await saveRec({ kind: 'per', nombre: x.nombre })).id;
+      if (partes.some(c => c.personaId === personaId)) throw new Error(`${nombrePersona(personaId)} aparece dos veces`);
+      partes.push(modo === 'pct' ? { personaId, pct: x.valor } : { personaId, monto: x.valor });
+    }
+  }
+  if (kind === 'mov') {
+    const rec = { ...r }; if (partes.length) rec.div = partes; else delete rec.div;
+    await saveRec(rec);
+  } else {
+    const divMes = { ...(r.divMes || {}) };
+    let divs = r.divs || [];
+    if (alcance === 'mes') divMes[m] = partes;
+    else { delete divMes[m]; divs = [...divs.filter(d => d.desde < m), { desde: m, partes }]; }
+    await saveRec({ ...r, divs, divMes });
+  }
+  closeSheet(); renderMain(); toast(partes.length ? 'División guardada' : 'División quitada');
+}
+function abrirPersonaForm(r = {}) {
+  openSheet(`<form id="f-persona" data-id="${esc(r.id || '')}" autocomplete="off"><h2>${r.id ? 'Editar persona' : 'Nueva persona'}</h2>
+    <label>Nombre<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Ana"></label>
+    <div class="err" id="err"></div>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${r.id ? `<button type="button" class="btn danger" data-act="borrar-persona" data-id="${esc(r.id)}">Eliminar</button>` : ''}</form>`);
+}
+async function guardarPersona(f) {
+  const nombre = f.elements.nombre.value.trim(), id = f.dataset.id || undefined;
+  if (!nombre) throw new Error('Escribe el nombre');
+  if (personas().some(t => t.id !== id && mismoNombre(t.nombre, nombre))) throw new Error('Ya tienes una persona con ese nombre');
+  await saveRec({ id, kind: 'per', nombre }); closeSheet(); renderMain(); toast('Persona guardada');
+}
+// ---------- Pagos fijos de una tarjeta
+const mesPagadoTarjeta = (t, m) => { const q = pagoDeTarjeta(t); return q && pagoMov(q, m) && !saldoTarjeta(q, m) ? pagoMov(q, m) : null; };
+// Si ese mes ya se pagó entero, el pago fijo nuevo queda pagado con él
+async function marcarFijoPagado(p, m, pagoTarjeta) {
+  if (pagoTarjeta) await saveRec({ kind: 'mov', fecha: pagoTarjeta.fecha, tipo: 'gasto', categoria: p.categoria, medio: 'credito', tarjetaId: p.tarjetaId, monto: p.monto, nota: p.nombre, pagoId: p.id, pagoMes: m, porPago: pagoTarjeta.id });
+}
+async function convertirEnFijo(id) {
+  const x = S.items.get(id); if (!x) return;
+  if (!nombreTarjeta(x.tarjetaId)) throw new Error('Primero elige la tarjeta de esta compra');
+  const m = mesDePagoCompra(x), nombre = x.nota || x.categoria || 'Pago fijo', pagado = mesPagadoTarjeta(x.tarjetaId, m);
+  if (fijoIgual(nombre, x.tarjetaId)) throw new Error('Ya tienes un pago fijo con ese nombre en esta tarjeta');
+  const dia = pagoDeTarjeta(x.tarjetaId)?.dia || +x.fecha.slice(8, 10);
+  const p = await saveRec({ kind: 'pag', nombre, dia, tipo: 'gasto', categoria: x.categoria || 'Cuentas', medio: 'credito', tarjetaId: x.tarjetaId, monto: x.monto, desde: m, ...(x.div ? { divs: [{ desde: m, partes: x.div }] } : {}) });
+  await delRec(id); await marcarFijoPagado(p, m, pagado);
+  closeSheet(); S.view = 'pagos'; S.pagosVista = 'tarjetas'; S.mes = m; renderMain(); toast('Convertido en pago fijo mensual');
 }
 function bloqueTarjeta(titulo, clave, cabecera, sinPago, cargos, m) {
   const cuotas = cargos.filter(x => x.p.cuotasTotal), fijos = cargos.filter(x => !x.p.cuotasTotal);
@@ -630,14 +792,16 @@ function filaPago({ p, mov }, m) {
   return `<div class="row pago">
     <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
       <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${tar && !enTarjeta(p) ? ' · ' + esc(tar) : ''}</span>
-      ${p.cuotasTotal ? `<span>${textoCuota(p, m, !!mov)}</span>` : ''}</div></button>
+      ${p.cuotasTotal ? `<span>${textoCuota(p, m, !!mov)}</span>` : ''}
+      ${partesDe(p, m).length ? `<span class="ok">${esc(textoDiv(partesDe(p, m), totalDivPago(p, m)))}</span>` : ''}</div></button>
     <div class="pago-der"><div class="am">${monto ? clp(monto) : 'Variable'}</div>
-      ${mov && !saldo ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div>
+      <div class="pago-acc">${p.tipo === 'pago_tarjeta' ? '' : `<button class="pago-btn sec" data-act="dividir-pago" data-id="${esc(p.id)}" aria-label="Dividir" title="Dividir">÷</button>`}
+      ${mov && !saldo ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div></div>
   </div>`;
 }
 function rowHTML(m) {
   const titulo = m.tipo === 'transferencia' ? (m.persona || 'Transferencia') : m.tipo === 'pago_tarjeta' ? 'Pago tarjeta' : (m.categoria || TIPOS[m.tipo]);
-  const sub = [m.tipo === 'gasto' && MEDIOS[m.medio], nombreTarjeta(m.tarjetaId), m.litros && `${String(m.litros).replace('.', ',')} L`, m.km && `${fmtNum(m.km)} km`, m.nota].filter(Boolean).join(' · ');
+  const sub = [m.tipo === 'gasto' && MEDIOS[m.medio], nombreTarjeta(m.tarjetaId), nombrePersona(m.personaId), m.litros && `${String(m.litros).replace('.', ',')} L`, m.km && `${fmtNum(m.km)} km`, m.nota].filter(Boolean).join(' · ');
   const ic = m.tipo === 'gasto' ? (CAT_ICON[m.categoria] || ICON.gasto) : ICON[m.tipo];
   const signo = m.tipo === 'ingreso' ? '' : '-';
   return `<button class="row" data-act="editar" data-id="${m.id}"><div class="ic">${ic}</div>
@@ -661,7 +825,7 @@ function formHTML(r, isTpl) {
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   const pers = [...new Set(movs().map(x => x.persona).filter(Boolean))];
   const mesFact = r.factMes || (r.id && r.fecha ? r.fecha.slice(0, 7) : S.mes);
-  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" autocomplete="off">
+  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" autocomplete="off">
     <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
     <div class="seg">${Object.entries(TIPOS).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
@@ -679,6 +843,8 @@ function formHTML(r, isTpl) {
       <div data-atajo hidden><label>Nombre del atajo<input name="nombreAtajo" maxlength="40" placeholder="Ej: Plata a Juan"></label></div>` : ''}
     <div class="err" id="err"></div>
     <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${!isTpl && r.id && r.tipo === 'gasto' && !r.pagoId ? `<button type="button" class="btn sec" data-act="dividir-mov" data-id="${esc(r.id)}">÷ Dividir con otra persona</button>` : ''}
+    ${!isTpl && r.id && esCredito(r) && !r.pagoId ? `<button type="button" class="btn sec" data-act="convertir-fijo" data-id="${esc(r.id)}">Convertir en pago fijo mensual</button>` : ''}
     ${r.id ? `<button type="button" class="btn danger" data-act="${isTpl ? 'borrar-atajo' : 'borrar-mov'}" data-id="${esc(r.id)}">Eliminar</button>` : ''}
     <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <datalist id="dl-per">${pers.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
@@ -717,6 +883,7 @@ function pagoFormHTML(r) {
     <label>Nota<input name="nota" maxlength="120" value="${esc(r.nota || '')}" placeholder="Opcional"></label>
     <div class="err" id="err"></div>
     <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    ${r.id && r.tipo !== 'pago_tarjeta' ? `<button type="button" class="btn sec" data-act="dividir-pago" data-id="${esc(r.id)}">÷ Dividir con otra persona</button>` : ''}
     ${r.id ? `<button type="button" class="btn danger" data-act="borrar-pago" data-id="${esc(r.id)}">Eliminar</button>` : ''}
     <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
   </form>`;
@@ -731,6 +898,8 @@ async function guardarPago(f) {
   const mesActual = hoy().slice(0, 7);
   const rec = { id, kind: 'pag', nombre: g('nombre') || 'Pago', dia, tipo, monto: parseMonto(g('monto')), desde: prev?.desde || (S.mes < mesActual ? S.mes : mesActual) };
   if (prev?.estados) rec.estados = prev.estados;
+  if (prev?.divs) rec.divs = prev.divs;
+  if (prev?.divMes) rec.divMes = prev.divMes;
   const cTotal = parseMonto(g('cuotaTotal')), cProx = parseMonto(g('cuotaProx')) || 1;
   if (cTotal) {
     if (cProx > cTotal) throw new Error('La cuota de este mes no puede ser mayor que el total');
@@ -790,7 +959,13 @@ async function cargarEstado(file, password) {
   // Reimportar: lo que ya existe queda sin registrar, para no duplicarlo
   for (const l of r.lineas) {
     if (l.accion === 'cuotas' && pagos().some(p => p.cuotasTotal === l.de && p.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un pago en cuotas igual. Se dejó sin registrar para no duplicarlo.'; }
-    else if ((l.accion === 'compra' || l.accion === 'cargo') && movs().some(x => esCredito(x) && x.fecha === l.fecha && x.monto === l.monto)) { l.era = l.accion; l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un movimiento igual. Se dejó sin registrar para no duplicarlo.'; }
+    else if (['compra', 'cargo', 'fijo'].includes(l.accion)) {
+      const fijo = l.accion !== 'cargo' && fijoIgual(l.desc), previo = movs().find(x => esCredito(x) && !x.pagoId && x.fecha === l.fecha && x.monto === l.monto);
+      if (previo) { l.era = l.accion === 'cargo' ? 'cargo' : 'compra'; l.movPrevioId = previo.id; }
+      if (fijo) { l.accion = 'ignorar'; l.existe = true; l.fijoId = fijo.id; l.aviso = fijo.monto === l.monto ? 'Ya está como pago fijo de la tarjeta.' : `Ya está como pago fijo. Su valor cambiará de ${clp(fijo.monto)} a ${clp(l.monto)}.`; }
+      else if (previo && l.accion === 'fijo') l.aviso = 'Se convertirá en pago fijo y reemplazará la compra ya registrada.';
+      else if (previo) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un movimiento igual. Se dejó sin registrar para no duplicarlo.'; }
+    }
   }
   S.impDatos = null; closeSheet(); S.imp = r; S.view = 'revision'; renderMain(); window.scrollTo(0, 0);
   const f = $('#f-import'), igual = tarjetas().find(t => r.clave.test(t.nombre));
@@ -858,7 +1033,18 @@ async function guardarImport(f) {
         await saveRec({ ...x, factMes: mes, ...(orig.era === 'cargo' ? { cargo: true } : {}) });
       }
     }
+    if (l.accion === 'ignorar' && orig.fijoId) {
+      const p = S.items.get(orig.fijoId);
+      if (p && l.monto > 0 && p.monto !== l.monto) await saveRec({ ...p, monto: l.monto });
+    }
     if (l.accion === 'ignorar') continue;
+    if (l.accion === 'fijo') {
+      const igual = fijoIgual(l.desc, tarjetaId), pagado = mesPagadoTarjeta(tarjetaId, mes);
+      const p = await saveRec(igual ? { ...igual, monto: l.monto } : { kind: 'pag', nombre: l.desc, dia, tipo: 'gasto', categoria: 'Cuentas', medio: 'credito', tarjetaId, monto: l.monto, desde: mes });
+      if (orig.movPrevioId) await delRec(orig.movPrevioId);
+      if (!igual) await marcarFijoPagado(p, mes, pagado);
+      n++; continue;
+    }
     if (l.accion === 'cuotas') {
       await saveRec({ kind: 'pag', nombre: l.desc, dia, tipo: 'gasto', categoria: 'Compras', medio: 'credito', tarjetaId, monto: l.monto, cuotasTotal: l.de, cuotasPrevias: Math.max(0, l.n - 1), desde: l.n === 0 ? shiftMes(r.lineas[i].primerMes || shiftMes(r.mes, 1), salto) : mes });
     } else {
@@ -907,6 +1093,8 @@ async function guardarForm(f) {
   if (f.dataset.pagoId && pagoMes) { rec.pagoId = f.dataset.pagoId; rec.pagoMes = pagoMes; }
   if (tipo === 'gasto' && base.medio === 'credito' && f.elements.factMes) rec.factMes = g('factMes');
   if (id && S.items.get(id)?.cargo) rec.cargo = true;
+  if (id && tipo === 'gasto' && S.items.get(id)?.div) rec.div = S.items.get(id).div;
+  if (f.dataset.persona && tipo === 'ingreso') { rec.personaId = f.dataset.persona; rec.reembolso = true; }
   if (tipo === 'gasto' && isBencina(base.categoria)) { const l = parseDec(g('litros')), km = parseMonto(g('km')); if (l) rec.litros = l; if (km) rec.km = km; }
   const pagoT = !id && tipo === 'pago_tarjeta' && rec.tarjetaId ? await registrarPagoTarjeta(rec) : null;
   if (pagoT) pagoMes = pagoT.mov.pagoMes || pagoMes; else await saveRec(rec);
@@ -948,6 +1136,20 @@ document.addEventListener('click', async e => {
       case 'tab': S.view = el.dataset.v; renderMain(); window.scrollTo(0, 0); break;
       case 'mes': S.mes = shiftMes(S.mes, +el.dataset.d); renderMain(); break;
       case 'nuevo': abrirForm(); break;
+      case 'dividir-mov': abrirDividir('mov', el.dataset.id); break;
+      case 'dividir-pago': abrirDividir('pag', el.dataset.id); break;
+      case 'div-fila': { const f = $('#f-dividir'); $('#div-filas').insertAdjacentHTML('beforeend', filaDividir(null, leerDividir(f).modo)); actualizarDividir(f); break; }
+      case 'div-quitar': { const f = $('#f-dividir'); try { await guardarDividir(f, true); } catch (ex) { f.querySelector('#err').textContent = ex.message; } break; }
+      case 'nueva-persona': abrirPersonaForm(); break;
+      case 'editar-persona': abrirPersonaForm(S.items.get(el.dataset.id)); break;
+      case 'borrar-persona': {
+        const saldo = cuentaPersonas(hoy().slice(0, 7)).find(c => c.t.id === el.dataset.id)?.total || 0;
+        if (saldo) { $('#err').textContent = `Aún tiene un saldo de ${clp(saldo)}. Regístralo o quita sus divisiones antes de eliminarla.`; break; }
+        if (await confirmar('¿Eliminar persona?', 'Sus pagos recibidos se conservan como movimientos.', 'Eliminar', true)) { await delRec(el.dataset.id); closeSheet(); renderMain(); }
+        break;
+      }
+      case 'registrar-reembolso': abrirForm({ tipo: 'ingreso', categoria: 'Reembolso', monto: +el.dataset.monto, personaId: el.dataset.id, nota: 'Pago de ' + nombrePersona(el.dataset.id), fecha: hoy() }); break;
+      case 'convertir-fijo': if (await confirmar('¿Convertir en pago fijo?', 'Dejará de ser una compra de una vez y aparecerá todos los meses en esta tarjeta.', 'Convertir')) await convertirEnFijo(el.dataset.id); break;
       case 'nueva-compra': abrirForm({ tipo: 'gasto', medio: 'credito' }); break;
       case 'vista-pagos': S.pagosVista = el.dataset.v; renderMain(); break;
       case 'filtro-medio': S.filtroMedio = el.dataset.v; renderMain(); break;
@@ -1000,6 +1202,8 @@ document.addEventListener('submit', async e => {
     else if (f.id === 'f-pago') await guardarPago(f);
     else if (f.id === 'f-tarjeta') await guardarTarjeta(f);
     else if (f.id === 'f-import') await guardarImport(f);
+    else if (f.id === 'f-dividir') await guardarDividir(f);
+    else if (f.id === 'f-persona') await guardarPersona(f);
     else if (f.id === 'f-clave') await cargarEstado(null, f.clave.value);
     else if (f.id === 'f-login') { if (btn) btn.textContent = 'Ingresando…'; S.loginMsg = ''; await ingresar(f.email.value.trim(), f.pw.value); }
     else if (f.id === 'f-mfa') { if (btn) btn.textContent = 'Verificando…'; await verificarCodigo(f.code.value); }
@@ -1017,10 +1221,12 @@ document.addEventListener('submit', async e => {
 document.addEventListener('change', async e => {
   const f = e.target.closest('#f-mov, #f-pago'); if (f) actualizarForm(f);
   const fi = e.target.closest('#f-import'); if (fi) actualizarImport(fi);
+  const fd = e.target.closest('#f-dividir'); if (fd) actualizarDividir(fd);
   if (e.target.id === 'imp-eecc' && e.target.files[0]) { const a = e.target.files[0]; e.target.value = ''; try { await cargarEstado(a); } catch (ex) { toast(ex.message, null, 6000); } }
   if (e.target.id === 'imp' && e.target.files[0]) { try { await importar(e.target.files[0]); } catch (ex) { toast(ex.message); } e.target.value = ''; }
 });
 document.addEventListener('input', e => {
+  const fd = e.target.closest('#f-dividir'); if (fd) { actualizarDividir(fd); return; }
   const fi = e.target.closest('#f-import');
   if (fi) { if (e.target.name === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; } actualizarImport(fi); return; }
   const f = e.target.closest('#f-mov, #f-pago'); if (!f) return;

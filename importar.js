@@ -9,6 +9,7 @@ window.FinImport = (() => {
   const mesCol = s => { if (!s) return null; const [m, y] = s.split('-'); return MES[m] ? `${y}-${String(MES[m]).padStart(2, '0')}` : null; };
   const sigMes = m => { let [y, mo] = m.split('-').map(Number); mo++; if (mo > 12) { mo = 1; y++; } return `${y}-${String(mo).padStart(2, '0')}`; };
   const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const SUSCRIPCION = /youtube|netflix|spotify|disney|hbo|prime video|amazon prime|paramount|crunchyroll|icloud|apple\.com|google one|microsoft 365|adobe|chatgpt|openai|anthropic/i;
 
   // Agrupa el texto por posición vertical para reconstruir las filas de cada tabla
   async function leerFilas(buffer, password) {
@@ -37,7 +38,7 @@ window.FinImport = (() => {
     const out = [];
     for (const f of filas) {
       let m = f.match(re);
-      if (m) { out.push({ fecha: iso(m[1]), desc: m[2].trim(), compra: n(m[3]), total: n(m[4]), n: +m[5], de: +m[6], primerMes: mesCol(m[7]), monto: m[8] ? n(m[8]) : 0 }); continue; }
+      if (m) { out.push({ fecha: iso(m[1]), desc: m[2].replace(/\s+(?:[A-Z]{2}\s+)?(?:USD|EUR)\s+[\d.,]+$/, '').trim(), compra: n(m[3]), total: n(m[4]), n: +m[5], de: +m[6], primerMes: mesCol(m[7]), monto: m[8] ? n(m[8]) : 0 }); continue; }
       m = /impuesto|comisi|interes|inter.s|servicio/i.test(f) && f.match(reCargo);
       if (m) out.push({ fecha: iso(m[1]), desc: m[2].trim(), compra: n(m[3]), total: n(m[4]), n: 1, de: 1, monto: n(m[5]) });
     }
@@ -77,6 +78,7 @@ window.FinImport = (() => {
       }
       if (l.de > 1) { l.accion = 'cuotas'; continue; }
       l.accion = 'compra';
+      if (SUSCRIPCION.test(l.desc)) { l.accion = 'fijo'; l.aviso = 'Parece una suscripción mensual: quedará como pago fijo de la tarjeta. Si no lo es, cámbialo.'; }
       if (pagos.some(p => p.fecha === l.fecha && p.pago === l.compra)) {
         l.accion = 'ignorar';
         l.aviso = 'Coincide con un pago de la tarjeta del mismo día y monto. Revisa si fue una compra real.';

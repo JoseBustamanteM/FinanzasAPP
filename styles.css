@@ -83,6 +83,8 @@ p{margin:6px 0}
 .vistas{display:flex;gap:6px;margin:12px 0}
 .vista{flex:1;min-width:0;padding:10px 6px;border-radius:12px;background:var(--card2);color:var(--tx);font-size:14px}
 .vista.on{background:var(--acc);color:#fff}
+.pago-acc{display:flex;gap:6px}
+.div-fila{margin-top:10px;padding-top:6px;border-top:1px solid var(--card2)}
 .bloque{margin:18px 0;padding-top:10px;border-top:1px solid var(--card2)}
 .empty{text-align:center;color:var(--mut);padding:30px 10px}
 
