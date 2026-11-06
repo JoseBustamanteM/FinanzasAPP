@@ -80,6 +80,10 @@ p{margin:6px 0}
 .pago-btn.hecho{background:var(--card2);color:var(--ok)}
 .tarj{background:var(--card2);border-radius:12px;padding:10px 12px;margin-top:10px}
 .tarj .bar-l{margin-bottom:2px}
+.vistas{display:flex;gap:6px;margin:12px 0}
+.vista{flex:1;min-width:0;padding:10px 6px;border-radius:12px;background:var(--card2);color:var(--tx);font-size:14px}
+.vista.on{background:var(--acc);color:#fff}
+.bloque{margin:18px 0;padding-top:10px;border-top:1px solid var(--card2)}
 .empty{text-align:center;color:var(--mut);padding:30px 10px}
 
 .fab{position:fixed;right:max(18px,calc(50% - 262px));bottom:calc(var(--safe-b) + 80px);width:60px;height:60px;border-radius:20px;background:var(--acc);color:#fff;font-size:32px;box-shadow:0 8px 24px rgba(0,0,0,.35);z-index:5}
