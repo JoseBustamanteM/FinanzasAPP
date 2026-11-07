@@ -100,7 +100,7 @@ function detalleTarjetas(m) {
   const ms = delMes(m);
   const fila = (clave, nombre) => {
     const de = ms.filter(x => claveTarjeta(x) === clave);
-    return { nombre, compras: sum(de.filter(esCredito)), pagado: sum(de.filter(x => x.tipo === 'pago_tarjeta')), deuda: clave ? porPagarTarjeta(clave, m) : deudaTarjeta(clave) };
+    return { nombre, compras: sum(gastosDelMes(m).filter(x => esCredito(x) && claveTarjeta(x) === clave)), pagado: sum(de.filter(x => x.tipo === 'pago_tarjeta')), deuda: clave ? faltaTarjeta(clave, m) : deudaTarjeta(clave) };
   };
   const out = tarjetas().map(t => fila(t.id, t.nombre));
   const sin = fila('', 'Sin tarjeta asignada');
@@ -194,7 +194,34 @@ function saldoTarjeta(p, m) {
   if (p.tipo !== 'pago_tarjeta' || !nombreTarjeta(p.tarjetaId)) return 0;
   const total = p.estados?.[m]?.total;
   if (total) return Math.max(0, total - pagadoEnMes(p, m));
-  return cargosPendientes(p.tarjetaId, m).length ? Math.max(0, porPagarTarjeta(p.tarjetaId, m)) : 0;
+  return porPagarMes(p, m);
+}
+// Lo que falta pagar de una tarjeta en ese mes: es la misma cifra en Inicio, Pagos y Ajustes
+const porPagarMes = (q, m) => Math.max(0, montoPago(q, m) - pagadoEnMes(q, m));
+function faltaTarjeta(t, m) {
+  const q = pagoDeTarjeta(t);
+  return q && pagoVisible(q, m) ? porPagarMes(q, m) : sum(cargosPendientes(t, m)) + sum(comprasTarjeta(t, m));
+}
+// Pagos de meses anteriores que siguen pendientes. No se suman al mes abierto.
+function atrasados(m) {
+  const out = [];
+  for (const p of pagos()) {
+    if (enTarjeta(p)) continue;
+    const inicio = shiftMes(m, -12);
+    for (let k = p.desde > inicio ? p.desde : inicio; k < m; k = shiftMes(k, 1)) {
+      if (!pagoVisible(p, k)) continue;
+      const falta = pagoMov(p, k) ? saldoTarjeta(p, k) : montoPago(p, k);
+      if (falta > 0) out.push({ p, mes: k, falta });
+    }
+  }
+  return out;
+}
+const textoAtrasados = lista => lista.slice(0, 4).map(a => `${a.p.nombre} (${mesLabel(a.mes)})`).join(', ') + (lista.length > 4 ? ` y ${lista.length - 4} más` : '');
+// Las cuotas y pagos fijos de una tarjeta son gasto del mes en que se cobran, aunque aún no se marquen
+function gastosDelMes(m) {
+  const propios = delMes(m).filter(x => x.tipo === 'gasto' && !(x.pagoId && esCargoTarjeta(S.items.get(x.pagoId) || {})));
+  const cargos = pagos().filter(p => esCargoTarjeta(p) && pagoVisible(p, m)).map(p => ({ tipo: 'gasto', medio: 'credito', categoria: p.categoria, tarjetaId: p.tarjetaId, monto: pagoMov(p, m)?.monto || p.monto }));
+  return [...propios, ...cargos];
 }
 function resumenPagos(m) {
   const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || pagoVisible(x.p, m));
@@ -202,7 +229,6 @@ function resumenPagos(m) {
   const pend = propios.filter(x => !x.mov || saldoTarjeta(x.p, m) > 0);
   return { lista, pend, porPagar: pend.reduce((a, x) => a + falta(x), 0), variables: pend.filter(x => !falta(x)).length, pagado: propios.reduce((a, x) => a + pagadoEnMes(x.p, m), 0) };
 }
-const porPagarTarjeta = (t, m) => deudaTarjeta(t) + sum(cargosPendientes(t, m));
 // Registra el pago de una tarjeta. Si cubre el total, deja pagadas todas sus cuotas de ese mes.
 async function registrarPagoTarjeta(rec) {
   const t = rec.tarjetaId;
@@ -212,7 +238,7 @@ async function registrarPagoTarjeta(rec) {
   if (q && !rec.pagoId) { rec.pagoId = q.id; rec.pagoMes = m; }
   const pend = cargosPendientes(t, m);
   const total = q?.estados?.[m]?.total;
-  const requerido = total ? total - pagadoEnMes(q, m) : deudaTarjeta(t) + sum(pend);
+  const requerido = q ? porPagarMes(q, m) : deudaTarjeta(t) + sum(pend);
   const completo = rec.monto >= requerido;
   const mov = await saveRec(rec);
   if (completo) for (const p of pend) {
@@ -512,11 +538,12 @@ function rendimientos() {
 const VIEWS = {
   inicio() {
     const ms = delMes(S.mes);
-    const gastos = ms.filter(x => x.tipo === 'gasto'), ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
+    const gastos = gastosDelMes(S.mes), ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
       transf = ms.filter(x => x.tipo === 'transferencia'), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
-    const deuda = deudaTarjeta() + tarjetas().reduce((a, t) => a + sum(cargosPendientes(t.id, S.mes)), 0);
+    const detalle = detalleTarjetas(S.mes), deuda = detalle.reduce((a, t) => a + Math.max(0, t.deuda), 0);
+    const atraso = atrasados(S.mes).filter(a => a.p.tipo === 'pago_tarjeta' || esCargoTarjeta(a.p));
     const rp = resumenPagos(S.mes);
     const R = sum(reembolsos), bal = I + R - G - T;
     const ben = gastos.filter(x => isBencina(x.categoria));
@@ -541,12 +568,13 @@ const VIEWS = {
           : `<p class="mut small">Crea atajos para lo que repites (bencina, una transferencia fija…) y regístralo con un toque.</p>`}
       </div>
       <div class="card"><h3>Tarjeta de crédito</h3><div class="kpis">
-        <div class="kpi"><div class="mut small">Compras del mes</div><div class="v">${clp(credMes)}</div></div>
+        <div class="kpi"><div class="mut small">Compras y cuotas del mes</div><div class="v">${clp(credMes)}</div></div>
         <div class="kpi"><div class="mut small">Pagado este mes</div><div class="v">${clp(P)}</div></div>
-        <div class="kpi wide"><div class="mut small">Por pagar (compras y cuotas del mes − pagos)</div><div class="v ${deuda > 0 ? 'bad' : ''}">${clp(deuda)}</div></div>
-      </div>${detalleTarjetas(S.mes).map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
-        <div class="mut small">Compras del mes ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
-      <p class="mut small">Las compras con crédito cuentan como gasto el día que compras. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
+        <div class="kpi wide"><div class="mut small">Por pagar este mes</div><div class="v ${deuda > 0 ? 'bad' : ''}">${clp(deuda)}</div></div>
+        ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
+      </div>${detalle.map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
+        <div class="mut small">Compras y cuotas ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
+      <p class="mut small">Las compras con crédito cuentan como gasto el día que compras; las cuotas y pagos fijos, en el mes que se cobran. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
       ${gastos.length ? `<div class="card"><h3>Gastos por categoría</h3>${bars(group(gastos, x => x.categoria || 'Otros'), G)}</div>` : ''}
       ${transf.length ? `<div class="card"><h3>Transferencias por persona</h3>${bars(group(transf, x => x.persona || 'Sin nombre'), T)}</div>` : ''}
       ${ben.length || rend.length ? `<div class="card"><h3>⛽ Bencina</h3><div class="kpis">
@@ -570,10 +598,11 @@ const VIEWS = {
     return html;
   },
   pagos() {
-    const r = resumenPagos(S.mes), vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p));
+    const r = resumenPagos(S.mes), atraso = atrasados(S.mes), vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p));
     return `<div class="card"><div class="kpis">
         <div class="kpi"><div class="mut small">Por pagar${r.variables ? ` (+${r.variables} sin monto fijo)` : ''}</div><div class="v ${r.porPagar ? 'bad' : ''}">${clp(r.porPagar)}</div></div>
         <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
+        ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
       </div></div>
       <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes', medeben: 'Me deben' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
       ${vista === 'tarjetas' ? `<button class="btn" data-act="nueva-compra">+ Agregar compra con tarjeta</button>
@@ -605,6 +634,7 @@ const VIEWS = {
         </select></label>
         <div class="two" data-cuotas><label><span class="lb">Cuota actual</span><input name="n" inputmode="numeric" value="${l.n}"></label><label><span class="lb">De un total de</span><input name="de" inputmode="numeric" value="${l.de}"></label></div>
         ${l.aviso ? `<p class="small warn">⚠️ ${esc(l.aviso)}</p>` : ''}
+        <p class="small warn" data-desfase hidden></p>
       </div>`).join('')}
       <div class="err" id="err"></div>
       <div class="acts"><button type="button" class="btn sec" data-act="cancelar-import">Cancelar</button><button class="btn">Confirmar y guardar</button></div>
@@ -628,7 +658,7 @@ const VIEWS = {
         <button class="btn danger" data-act="logout">Cerrar sesión</button>
         <p class="mut small">Al cerrar sesión se borran los datos de este dispositivo (siguen en tu cuenta). Úsalo si el dispositivo es compartido.</p></div>
       <div class="card"><h3>Mis tarjetas</h3>
-        ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(porPagarTarjeta(t.id, S.mes))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
+        ${tarjetas().map(t => `<button class="row" data-act="editar-tarjeta" data-id="${esc(t.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(t.nombre)}</b><span>Por pagar ${clp(faltaTarjeta(t.id, S.mes))}</span></div></button>`).join('') || '<p class="mut small">Agrega tus tarjetas de crédito para ver cuánto debes en cada una.</p>'}
         <button class="btn sec" data-act="nueva-tarjeta">+ Agregar tarjeta</button></div>
       <div class="card"><h3>Personas</h3>
         ${personas().map(t => `<button class="row" data-act="editar-persona" data-id="${esc(t.id)}"><div class="ic">👤</div><div class="tx"><b>${esc(t.nombre)}</b></div></button>`).join('') || '<p class="mut small">Agrega a quienes comparten gastos contigo. Solo se guarda el nombre.</p>'}
@@ -934,7 +964,7 @@ async function pagarPago(id) {
   const fecha = m >= hoy().slice(0, 7) ? hoy() : venceEn.startsWith(m) ? venceEn : `${m}-${String(new Date(+m.slice(0, 4), +m.slice(5), 0).getDate())}`;
   if (!p.monto || p.estados?.[m]?.total || saldo) {
     const conTarjeta = !!nombreTarjeta(p.tarjetaId);
-    const deuda = p.tipo !== 'pago_tarjeta' ? 0 : saldo || p.estados?.[m]?.total || (conTarjeta ? porPagarTarjeta(p.tarjetaId, m) : deudaTarjeta());
+    const deuda = p.tipo !== 'pago_tarjeta' ? 0 : saldo || p.estados?.[m]?.total || (conTarjeta ? porPagarMes(p, m) : deudaTarjeta());
     abrirForm({ ...base, fecha, monto: deuda > 0 ? deuda : 0 }); return;
   }
   const mov = await saveRec({ kind: 'mov', fecha, monto: p.monto, ...base });
@@ -959,12 +989,16 @@ async function cargarEstado(file, password) {
   }
   const r = FinImport.analizar(filas);
   if (!r) throw new Error('No reconozco este formato. Por ahora se leen CMR Falabella y BCI; agrega tus pagos a mano.');
-  // Reimportar: lo que ya existe queda sin registrar, para no duplicarlo
+  // Reimportar: lo que ya existe queda sin registrar. Solo es igual si coincide en tarjeta y compra, y cada registro se usa una vez.
+  const tjProbable = tarjetas().find(t => r.clave.test(t.nombre))?.id, usados = new Set();
   for (const l of r.lineas) {
-    if (l.accion === 'cuotas' && pagos().some(p => p.cuotasTotal === l.de && p.monto === l.monto)) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un pago en cuotas igual. Se dejó sin registrar para no duplicarlo.'; }
-    else if (['compra', 'cargo', 'fijo'].includes(l.accion)) {
-      const fijo = l.accion !== 'cargo' && fijoIgual(l.desc), previo = movs().find(x => esCredito(x) && !x.pagoId && x.fecha === l.fecha && x.monto === l.monto);
-      if (previo) { l.era = l.accion === 'cargo' ? 'cargo' : 'compra'; l.movPrevioId = previo.id; }
+    if (l.accion === 'cuotas') {
+      const c = pagos().find(p => !usados.has(p.id) && p.cuotasTotal === l.de && Math.abs(p.monto - l.monto) <= 50 && mismoNombre(p.nombre, l.desc) && (!tjProbable || p.tarjetaId === tjProbable) && ultimoMesCuota(p) >= shiftMes(r.mes, -2));
+      if (c) { usados.add(c.id); l.cuotaId = c.id; l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes esta compra en cuotas. Se dejó sin registrar para no duplicarla.'; }
+    } else if (['compra', 'cargo', 'fijo'].includes(l.accion)) {
+      const fijo = l.accion !== 'cargo' && fijoIgual(l.desc, tjProbable);
+      const previo = movs().find(x => esCredito(x) && !x.pagoId && !usados.has(x.id) && x.fecha === l.fecha && x.monto === l.monto && (tjProbable ? !claveTarjeta(x) || claveTarjeta(x) === tjProbable : mismoNombre(x.nota, l.desc)));
+      if (previo) { usados.add(previo.id); l.era = l.accion === 'cargo' ? 'cargo' : 'compra'; l.movPrevioId = previo.id; }
       if (fijo) { l.accion = 'ignorar'; l.existe = true; l.fijoId = fijo.id; l.aviso = fijo.monto === l.monto ? 'Ya está como pago fijo de la tarjeta.' : `Ya está como pago fijo. Su valor cambiará de ${clp(fijo.monto)} a ${clp(l.monto)}.`; }
       else if (previo && l.accion === 'fijo') l.aviso = 'Se convertirá en pago fijo y reemplazará la compra ya registrada.';
       else if (previo) { l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes un movimiento igual. Se dejó sin registrar para no duplicarlo.'; }
@@ -985,9 +1019,12 @@ function leerLinea(el) {
   const v = k => el.querySelector(`[name=${k}]`).value.trim();
   return { desc: v('desc'), fecha: v('fecha'), monto: parseMonto(v('monto')), accion: v('accion'), n: parseMonto(v('n')), de: parseMonto(v('de')) };
 }
+// La cuota que la app espera en ese mes, para compararla con la que indica el banco
+const cuotaEsperada = (p, m) => (p.cuotasPrevias || 0) + 1 + difMes(p.desde, m);
 function actualizarImport(f) {
   const tj = f.querySelector('[data-tarjeta-nueva]'); if (tj) tj.hidden = f.elements.tarjetaId.value !== '__nueva';
-  let suma = 0, cuantas = 0, yaEstan = 0, abonos = 0;
+  let suma = 0, cuantas = 0, yaEstan = 0, abonos = 0, desfases = 0;
+  const mesImp = f.elements.mesPago.value, moverDesde = estadoEnOtroMes(f.elements.tarjetaId.value, mesImp);
   f.querySelectorAll('.imp').forEach(el => {
     const l = leerLinea(el);
     el.classList.toggle('off', l.accion === 'ignorar');
@@ -996,10 +1033,15 @@ function actualizarImport(f) {
     if (l.accion !== 'ignorar') { cuantas++; if (!(l.accion === 'cuotas' && l.n === 0)) suma += l.monto; }
     else if (S.imp.lineas[+el.dataset.i].existe) { yaEstan++; if (l.n !== 0) suma += l.monto; } // ya registradas: también cuentan para cuadrar con el banco
     else if (S.imp.lineas[+el.dataset.i].pago) abonos += l.monto;
+    const orig = S.imp.lineas[+el.dataset.i], p = orig.cuotaId && S.items.get(orig.cuotaId), desf = el.querySelector('[data-desfase]');
+    const esperada = p && !moverDesde && l.accion === 'ignorar' && l.n > 0 && cuotaEsperada(p, mesImp) !== l.n ? cuotaEsperada(p, mesImp) : 0;
+    desf.hidden = !esperada;
+    if (esperada) { desfases++; desf.textContent = `⚠️ La app tenía la cuota ${esperada} en ${mesLabel(mesImp)} y el banco indica la ${l.n}. Al confirmar quedará la ${l.n}.`; }
   });
   const dif = suma - S.imp.total, m = f.elements.mesPago.value, otro = estadoEnOtroMes(f.elements.tarjetaId.value, m), aviso = $('#imp-mes');
   aviso.textContent = otro ? `Este estado de cuenta ya está en ${mesLabel(otro)}. Al confirmar se moverá a ${mesLabel(m)}.`
     : m !== S.imp.mes ? `El banco indica que vence el ${S.imp.vence.split('-').reverse().join('/')}. Lo verás en ${mesLabel(m)} porque lo elegiste aquí.` : '';
+  if (desfases) aviso.textContent += `${aviso.textContent ? ' ' : ''}${desfases} cuota${desfases === 1 ? ' no coincide' : 's no coinciden'} con este mes: revisa que el mes elegido sea el correcto.`;
   aviso.hidden = !aviso.textContent;
   $('#imp-res').innerHTML = `${cuantas} línea${cuantas === 1 ? '' : 's'} por registrar${yaEstan ? ` · ${yaEstan} ya registrada${yaEstan === 1 ? '' : 's'}` : ''} · suma <b>${clp(suma)}</b><br>${abonos ? `Pagos a la tarjeta leídos: ${clp(abonos)} (no se suman)<br>` : ''}${dif === 0 ? '<span class="ok">✓ Coincide con el total del banco</span>' : `<span class="warn">⚠️ Diferencia con el total del banco: ${clp(dif)}</span>`}`;
 }
@@ -1020,10 +1062,10 @@ async function guardarImport(f) {
     if (pagadoEnMes(q, otro)) throw new Error(`Este estado de cuenta ya tiene un pago en ${mesLabel(otro)}. Elimina ese pago antes de moverlo.`);
     delete estados[otro];
     // Lo ya importado se mueve con el estado de cuenta, para que no quede en el mes anterior
-    const movidas = new Set();
-    for (const l of r.lineas.filter(x => x.existe && x.de > 1)) {
-      const p = pagos().find(c => !movidas.has(c.id) && esCargoTarjeta(c) && c.tarjetaId === tarjetaId && c.cuotasTotal === l.de && c.monto === l.monto && !movs().some(x => x.pagoId === c.id));
-      if (p) { movidas.add(p.id); await saveRec({ ...p, desde: shiftMes(p.desde, difMes(otro, mes)) }); }
+    for (const l of r.lineas.filter(x => x.cuotaId || x.fijoId)) {
+      const p = S.items.get(l.cuotaId || l.fijoId);
+      if (!p || p.tarjetaId !== tarjetaId || movs().some(x => x.pagoId === p.id) || (l.fijoId && p.desde !== otro)) continue;
+      await saveRec({ ...p, desde: shiftMes(p.desde, difMes(otro, mes)) });
     }
   }
   const desde = otro && q.desde === otro ? mes : q.desde < mes ? q.desde : mes;
@@ -1032,10 +1074,14 @@ async function guardarImport(f) {
   for (let i = 0; i < lineas.length; i++) {
     const l = lineas[i], orig = r.lineas[i];
     // Lo ya registrado queda asociado al mes de este estado de cuenta, sin duplicarse
-    if (l.accion === 'ignorar' && orig.era) {
-      for (const x of movs().filter(c => esCredito(c) && !c.pagoId && c.fecha === orig.fecha && c.monto === orig.monto && claveTarjeta(c) === tarjetaId)) {
-        await saveRec({ ...x, factMes: mes, ...(orig.era === 'cargo' ? { cargo: true } : {}) });
-      }
+    if (l.accion === 'ignorar' && orig.movPrevioId && S.items.get(orig.movPrevioId)) {
+      const x = S.items.get(orig.movPrevioId);
+      await saveRec({ ...x, factMes: mes, tarjetaId: claveTarjeta(x) || tarjetaId, ...(orig.era === 'cargo' ? { cargo: true } : {}) });
+    }
+    // Si la cuota no coincide con el banco, manda el banco
+    if (l.accion === 'ignorar' && orig.cuotaId && !otro && l.n > 0 && S.items.get(orig.cuotaId)) {
+      const p = S.items.get(orig.cuotaId), previas = l.n - 1 - difMes(p.desde, mes);
+      if (cuotaEsperada(p, mes) !== l.n) await saveRec(previas >= 0 ? { ...p, cuotasPrevias: previas } : { ...p, desde: mes, cuotasPrevias: l.n - 1 });
     }
     if (l.accion === 'ignorar' && orig.fijoId) {
       const p = S.items.get(orig.fijoId);
