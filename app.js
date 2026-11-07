@@ -595,14 +595,15 @@ const VIEWS = {
       <p class="small warn" id="imp-mes" hidden></p>
       <div class="note" id="imp-res"></div></div>
       <p class="mut small">Revisa cada línea y corrige lo que haga falta. Nada se guarda hasta que confirmes.</p>
-      ${r.lineas.map((l, i) => `<div class="imp" data-i="${i}">
+      <div class="imp-cab" aria-hidden="true"><span>Descripción</span><span>Fecha</span><span>Valor</span><span>Qué hacer</span><span>Cuota</span><span>De</span></div>
+      ${r.lineas.map((l, i) => `<div class="imp" data-i="${i}" data-accion="${esc(l.accion)}">
         <input name="desc" maxlength="60" value="${esc(l.desc)}" aria-label="Descripción">
-        <div class="two"><label>Fecha<input type="date" name="fecha" value="${esc(l.fecha)}"></label>
-          <label>Valor<input name="monto" inputmode="numeric" value="${l.monto > 0 ? fmtNum(l.monto) : ''}"></label></div>
-        <label>Qué hacer<select name="accion">
+        <div class="two"><label><span class="lb">Fecha</span><input type="date" name="fecha" value="${esc(l.fecha)}"></label>
+          <label><span class="lb">Valor</span><input name="monto" inputmode="numeric" value="${l.monto > 0 ? fmtNum(l.monto) : ''}"></label></div>
+        <label><span class="lb">Qué hacer</span><select name="accion">
           ${Object.entries({ cuotas: 'Compra en cuotas', compra: 'Compra de una sola vez', fijo: 'Pago fijo mensual', cargo: 'Cargo o interés', ignorar: 'No registrar' }).map(([k, v]) => `<option value="${k}" ${k === l.accion ? 'selected' : ''}>${v}</option>`).join('')}
         </select></label>
-        <div class="two" data-cuotas><label>Cuota actual<input name="n" inputmode="numeric" value="${l.n}"></label><label>De un total de<input name="de" inputmode="numeric" value="${l.de}"></label></div>
+        <div class="two" data-cuotas><label><span class="lb">Cuota actual</span><input name="n" inputmode="numeric" value="${l.n}"></label><label><span class="lb">De un total de</span><input name="de" inputmode="numeric" value="${l.de}"></label></div>
         ${l.aviso ? `<p class="small warn">⚠️ ${esc(l.aviso)}</p>` : ''}
       </div>`).join('')}
       <div class="err" id="err"></div>
@@ -650,7 +651,7 @@ function vistaMeDeben(m) {
   return `<div class="card"><div class="kpi"><div class="mut small">Me deben en total</div><div class="v ${total ? 'ok' : ''}">${clp(total)}</div></div>
       <p class="mut small">No cuenta en tu balance hasta que registres que te pagaron. Para dividir algo, toca ÷ en una compra o una cuota.</p></div>
     <button class="btn sec" data-act="nueva-persona">+ Agregar persona</button>
-    ${conMovimiento.map(c => `<section class="bloque"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'ok' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
+    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'ok' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
       ${c.previo ? `<div class="bar-l small"><span>${c.previo > 0 ? 'Pendiente de meses anteriores' : 'A favor de meses anteriores'}</span><span>${clp(Math.abs(c.previo))}</span></div>` : ''}
       ${c.delMes.map(d => `<div class="bar-l small"><span>${esc(d.nombre)}${d.pct ? ` (${String(d.pct).replace('.', ',')}%)` : ''}</span><span>${clp(d.monto)}</span></div>`).join('')}
       ${c.abonosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💰</div><div class="tx"><b>Pago recibido</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
@@ -762,13 +763,15 @@ async function convertirEnFijo(id) {
   await delRec(id); await marcarFijoPagado(p, m, pagado);
   closeSheet(); S.view = 'pagos'; S.pagosVista = 'tarjetas'; S.mes = m; renderMain(); toast('Convertido en pago fijo mensual');
 }
+// Cada tarjeta conserva siempre el mismo color
+const colorTarjeta = id => (id ? `tc-${[...id].reduce((a, c) => a + c.charCodeAt(0), 0) % 6}` : 'tc-g');
 function bloqueTarjeta(titulo, clave, cabecera, sinPago, cargos, m) {
   const cuotas = cargos.filter(x => x.p.cuotasTotal), fijos = cargos.filter(x => !x.p.cuotasTotal);
   const cm = comprasTarjeta(clave, m), compras = cm.filter(x => !x.cargo), cobros = cm.filter(x => x.cargo);
   if (!cabecera.length && !cargos.length && !cm.length) return '';
   const seccion = (t, html) => (html ? `<div class="day">${t}</div>${html}` : '');
   const total = sum(cm) + cargos.filter(x => !x.mov).reduce((a, x) => a + montoPago(x.p, m), 0);
-  return `<section class="bloque">${cabecera.length ? cabecera.map(x => filaPago(x, m)).join('') : `<div class="bar-l"><b>${esc(titulo)}</b><b>${clp(total)}</b></div>${sinPago}`}
+  return `<section class="bloque ${colorTarjeta(clave)}">${cabecera.length ? cabecera.map(x => filaPago(x, m)).join('') : `<div class="bar-l cab-simple"><b>${esc(titulo)}</b><b>${clp(total)}</b></div>${sinPago}`}
     ${seccion('Cuotas', cuotas.map(x => filaPago(x, m)).join(''))}
     ${seccion('Pagos fijos', fijos.map(x => filaPago(x, m)).join(''))}
     ${seccion('Compras de una sola vez', compras.map(filaCompra).join(''))}
@@ -789,7 +792,7 @@ function vistaTarjetas(lista, m) {
 }
 function filaPago({ p, mov }, m) {
   const [c, t] = estadoPago(p, m, mov), tar = nombreTarjeta(p.tarjetaId), saldo = mov ? saldoTarjeta(p, m) : 0, monto = saldo || (mov ? pagadoEnMes(p, m) : montoPago(p, m));
-  return `<div class="row pago">
+  return `<div class="row pago ${p.tipo === 'pago_tarjeta' ? 'cab-tarjeta' : ''}">
     <button class="pago-info" data-act="editar-pago" data-id="${esc(p.id)}"><div class="ic">${p.tipo === 'gasto' ? (CAT_ICON[p.categoria] || ICON.gasto) : ICON[p.tipo]}</div>
       <div class="tx"><b>${esc(p.nombre)}</b><span class="${c}">${esc(t)}${tar && !enTarjeta(p) ? ' · ' + esc(tar) : ''}</span>
       ${p.cuotasTotal ? `<span>${textoCuota(p, m, !!mov)}</span>` : ''}
@@ -988,6 +991,7 @@ function actualizarImport(f) {
   f.querySelectorAll('.imp').forEach(el => {
     const l = leerLinea(el);
     el.classList.toggle('off', l.accion === 'ignorar');
+    el.dataset.accion = l.accion;
     el.querySelector('[data-cuotas]').hidden = l.accion !== 'cuotas';
     if (l.accion !== 'ignorar') { cuantas++; if (!(l.accion === 'cuotas' && l.n === 0)) suma += l.monto; }
     else if (S.imp.lineas[+el.dataset.i].existe) { yaEstan++; if (l.n !== 0) suma += l.monto; } // ya registradas: también cuentan para cuadrar con el banco
