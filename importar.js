@@ -100,6 +100,9 @@ window.FinImport = (() => {
     }
     if (!r || !r.lineas.length) return null;
     r.mes = r.vence.slice(0, 7);
+    // Fecha de facturación (cierre): la del banco si aparece; si no, la última compra del período
+    const fact = dato(/(?:fecha\s+(?:de\s+)?(?:facturaci.n|estado\s+de\s+cuenta)|per.odo\s+(?:de\s+)?facturaci.n.*?\b(?:al|hasta))\s*:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    r.cierre = fact && iso(fact) <= r.vence ? iso(fact) : r.lineas.map(l => l.fecha).filter(f => f && f <= r.vence).sort().pop();
     clasificar(r.lineas, r.mes);
     return r;
   }

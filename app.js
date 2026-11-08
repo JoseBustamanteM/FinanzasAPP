@@ -118,6 +118,20 @@ async function resolverTarjeta(f, tipo) {
   return igual ? igual.id : (await saveRec({ kind: 'tar', nombre })).id;
 }
 
+// Mes en que se paga una compra con crédito, según el cierre del último estado de cuenta de esa tarjeta
+function mesFacturacion(tarjetaId, fecha) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha || '')) return null;
+  const mesCompra = fecha.slice(0, 7), dia = +fecha.slice(8, 10), q = nombreTarjeta(tarjetaId) && pagoDeTarjeta(tarjetaId);
+  const cierreDe = k => q.estados[k].cierre || movs().filter(x => x.tarjetaId === tarjetaId && x.factMes === k && x.fecha).map(x => x.fecha).sort().pop();
+  const k = q && Object.keys(q.estados || {}).sort().reverse().find(cierreDe);
+  if (k) {
+    const c = cierreDe(k), diaC = +c.slice(8, 10), salto = Math.max(0, difMes(c.slice(0, 7), k));
+    return { mes: shiftMes(mesCompra, salto + (dia > diaC ? 1 : 0)), como: `Estimado con tu último estado de cuenta: la tarjeta factura cerca del día ${diaC} y se paga ${salto === 0 ? 'ese mismo mes' : salto === 1 ? 'al mes siguiente' : `${salto} meses después`}. Si la compra quedó en otro mes, cámbialo; al importar el estado de cuenta se corrige solo.` };
+  }
+  return { mes: shiftMes(mesCompra, 1), como: `Estimado: el mes siguiente a la compra. Cuando importes un estado de cuenta${q ? ' de esta tarjeta' : ''}, la app aprende su fecha de facturación y lo calcula mejor.` };
+}
+const opcionesMes = (centro, sel) => [-2, -1, 0, 1, 2].map(d => shiftMes(centro, d)).map(v => `<option value="${v}" ${v === sel ? 'selected' : ''}>${mesLabel(v)}</option>`).join('');
+
 // ---------- Pagos mensuales: cada pago se marca por mes y genera un movimiento normal
 const pagos = () => [...S.items.values()].filter(x => x.kind === 'pag').sort((a, b) => a.dia - b.dia || a.nombre.localeCompare(b.nombre));
 const pagoMov = (p, m) => movs().find(x => x.pagoId === p.id && x.pagoMes === m);
@@ -145,6 +159,16 @@ const mesDePagoCompra = x => x.factMes || (x.fecha || '').slice(0, 7);
 const comprasTarjeta = (clave, m) => movs().filter(x => esCredito(x) && !x.pagoId && claveTarjeta(x) === clave && mesDePagoCompra(x) === m).sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
 const esPagoTC = p => p.tipo === 'pago_tarjeta' || (p.tipo === 'gasto' && p.medio === 'credito');
 const mismoNombre = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+// Para reconocer la misma compra con el nombre que da la app del banco y el del estado de cuenta
+const palabras = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const GENERICAS = new Set(['compra', 'compras', 'cuota', 'cuotas', 'interes', 'pago', 'pagos', 'nacional', 'internacional', 'tienda', 'chile', 'santiago']);
+function nombreParecido(a, b) {
+  const x = palabras(a), y = palabras(b);
+  if (!x || !y) return false;
+  if (x === y || x.includes(y) || y.includes(x)) return true;
+  const sy = new Set(y.split(' '));
+  return x.split(' ').some(w => w.length >= 5 && !GENERICAS.has(w) && sy.has(w));
+}
 const fijoIgual = (desc, tarjetaId) => pagos().find(p => esCargoTarjeta(p) && !p.cuotasTotal && mismoNombre(p.nombre, desc) && (!tarjetaId || p.tarjetaId === tarjetaId));
 // Personas y división de gastos. Lo que te deben no toca el balance hasta que llega el dinero.
 const personas = () => [...S.items.values()].filter(x => x.kind === 'per').sort((a, b) => a.nombre.localeCompare(b.nombre));
@@ -861,6 +885,8 @@ function formHTML(r, isTpl) {
   return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" autocomplete="off">
     <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
+    ${!isTpl && !r.id && !r.pagoId ? `<label class="btn sec foto-btn">📷 Leer foto de la compra<input type="file" id="foto-mov" accept="image/*" hidden></label>
+      <p class="mut small" id="foto-estado" hidden></p>` : ''}
     <div class="seg">${Object.entries(TIPOS).map(([k, v]) => `<label><input type="radio" name="tipo" value="${k}" ${k === tipo ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
     <label>Monto${isTpl ? ' (vacío si cambia cada vez)' : ''}<input name="monto" class="big" inputmode="numeric" value="${r.monto ? fmtNum(r.monto) : ''}" placeholder="$0" ${isTpl ? '' : 'required'}></label>
     <div data-show="gasto ingreso"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Comida"></label></div>
@@ -869,7 +895,8 @@ function formHTML(r, isTpl) {
     ${isTpl || r.pagoId ? '' : `<div data-fact>${r.id ? '' : `<div class="two"><label>Cuotas<input name="cuotas" inputmode="numeric" placeholder="1"></label>
       <label>Valor de cada cuota<input name="valorCuota" inputmode="numeric" placeholder="Automático"></label></div>
       <p class="mut small" data-cuotas-info hidden></p>`}
-      <label><span data-fact-lb>Se paga en el mes</span><select name="factMes">${[-2, -1, 0, 1, 2].map(d => shiftMes(mesFact, d)).map(v => `<option value="${v}" ${v === mesFact ? 'selected' : ''}>${mesLabel(v)}</option>`).join('')}</select></label></div>`}
+      <label><span data-fact-lb>Se paga en el mes</span><select name="factMes">${opcionesMes(mesFact, mesFact)}</select></label>
+      ${r.id ? '' : '<p class="mut small" data-fact-info hidden></p>'}</div>`}
     <div data-show="transferencia"><label>Persona<input name="persona" list="dl-per" value="${esc(r.persona || '')}" placeholder="¿A quién?"></label></div>
     ${isTpl ? '' : `<div data-bencina class="two"><label>Litros<input name="litros" inputmode="decimal" value="${r.litros ? String(r.litros).replace('.', ',') : ''}" placeholder="Opcional"></label>
       <label>Kilometraje<input name="km" inputmode="numeric" value="${r.km ? fmtNum(r.km) : ''}" placeholder="Opcional"></label></div>
@@ -996,7 +1023,7 @@ async function cargarEstado(file, password) {
   const tjProbable = tarjetas().find(t => r.clave.test(t.nombre))?.id, usados = new Set();
   for (const l of r.lineas) {
     if (l.accion === 'cuotas') {
-      const c = pagos().find(p => !usados.has(p.id) && p.cuotasTotal === l.de && Math.abs(p.monto - l.monto) <= 50 && mismoNombre(p.nombre, l.desc) && (!tjProbable || p.tarjetaId === tjProbable) && ultimoMesCuota(p) >= shiftMes(r.mes, -2));
+      const c = pagos().find(p => !usados.has(p.id) && p.cuotasTotal === l.de && Math.abs(p.monto - l.monto) <= 50 && (mismoNombre(p.nombre, l.desc) || nombreParecido(p.nombre, l.desc) || (p.compraFecha && p.compraFecha === l.fecha)) && (!tjProbable || p.tarjetaId === tjProbable) && ultimoMesCuota(p) >= shiftMes(r.mes, -2));
       if (c) { usados.add(c.id); l.cuotaId = c.id; l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes esta compra en cuotas. Se dejó sin registrar para no duplicarla.'; }
     } else if (['compra', 'cargo', 'fijo'].includes(l.accion)) {
       const fijo = l.accion !== 'cargo' && fijoIgual(l.desc, tjProbable);
@@ -1072,7 +1099,7 @@ async function guardarImport(f) {
     }
   }
   const desde = otro && q.desde === otro ? mes : q.desde < mes ? q.desde : mes;
-  await saveRec({ ...q, desde, estados: { ...estados, [mes]: { total: r.total, vence: r.vence } } });
+  await saveRec({ ...q, desde, estados: { ...estados, [mes]: { total: r.total, vence: r.vence, ...(r.cierre ? { cierre: r.cierre } : {}) } } });
   let n = 0;
   for (let i = 0; i < lineas.length; i++) {
     const l = lineas[i], orig = r.lineas[i];
@@ -1108,6 +1135,31 @@ async function guardarImport(f) {
   S.mes = mes; S.imp = null; S.view = 'pagos'; renderMain(); window.scrollTo(0, 0);
   toast(`${n} línea${n === 1 ? '' : 's'} guardada${n === 1 ? '' : 's'}`);
 }
+// Llena el formulario con la foto o captura del detalle de la compra en la app del banco
+async function leerFoto(archivo, f) {
+  const est = f.querySelector('#foto-estado'), btn = f.querySelector('.foto-btn');
+  est.hidden = false; btn.classList.add('ocupado');
+  est.textContent = 'Leyendo la foto en este dispositivo… La primera vez descarga el lector (unos 6 MB).';
+  try {
+    const r = await FinFoto.leer(archivo, p => { est.textContent = `Leyendo la foto… ${Math.round(p * 100)}%`; });
+    if (!document.contains(f)) return;
+    if (!r.monto && !r.comercio) { est.textContent = 'No encontré los datos de la compra en la foto. Prueba con una captura de pantalla del detalle del movimiento.'; return; }
+    f.querySelector('input[name=tipo][value=gasto]').checked = true;
+    f.querySelector('input[name=medio][value=credito]').checked = true;
+    if (r.monto) f.elements.monto.value = fmtNum(r.monto);
+    if (r.fecha) f.elements.fecha.value = r.fecha;
+    if (r.comercio) f.elements.nota.value = r.comercio;
+    if (r.cuotas) f.elements.cuotas.value = r.cuotas;
+    if (r.valorCuota) f.elements.valorCuota.value = fmtNum(r.valorCuota);
+    else if (r.sinInteres) f.elements.valorCuota.value = '';
+    actualizarForm(f);
+    const leido = [r.monto && clp(r.monto), r.fecha && r.fecha.split('-').reverse().join('/'), r.cuotas && `${r.cuotas} cuotas`, r.valorCuota && `cuota de ${clp(r.valorCuota)}`].filter(Boolean).join(' · ');
+    const falta = r.cuotas ? '' : r.sinInteres ? ' Es sin interés: escribe el número de cuotas y el valor de cada una se calcula solo.' : ' Si la compraste en cuotas, escribe cuántas.';
+    est.textContent = `Leído: ${leido || 'solo el comercio'}.${falta} Revisa los datos y la tarjeta antes de guardar.`;
+    if (!r.cuotas) f.elements.cuotas.focus();
+  } catch (ex) { est.textContent = ex.message || 'No se pudo leer la foto.'; }
+  finally { btn.classList.remove('ocupado'); }
+}
 function abrirForm(r = {}, isTpl = false) { openSheet(formHTML(r, isTpl)); actualizarForm($('#f-mov')); }
 function actualizarForm(f) {
   if (!f) return;
@@ -1116,6 +1168,12 @@ function actualizarForm(f) {
   const b = f.querySelector('[data-bencina]'); if (b) b.hidden = !(tipo === 'gasto' && isBencina(f.categoria.value));
   const a = f.querySelector('[data-atajo]'); if (a) a.hidden = !f.comoAtajo.checked;
   const fc = f.querySelector('[data-fact]'); if (fc) fc.hidden = !(tipo === 'gasto' && f.querySelector('input[name=medio]:checked')?.value === 'credito');
+  const fi = f.querySelector('[data-fact-info]');
+  if (fi && !fc.hidden && !f.dataset.factManual) {
+    const est = mesFacturacion(f.elements.tarjetaId.value, f.elements.fecha.value);
+    if (est && f.elements.factMes.value !== est.mes) f.elements.factMes.innerHTML = opcionesMes(est.mes, est.mes);
+    fi.textContent = est ? est.como : ''; fi.hidden = !est;
+  } else if (fi) fi.hidden = true;
   if (f.elements.cuotas) {
     const n = parseMonto(f.elements.cuotas.value), monto = parseMonto(f.elements.monto.value), vc = parseMonto(f.elements.valorCuota.value);
     const info = f.querySelector('[data-cuotas-info]'), enCuotas = n > 1;
@@ -1295,6 +1353,8 @@ document.addEventListener('submit', async e => {
 });
 
 document.addEventListener('change', async e => {
+  if (e.target.name === 'factMes') e.target.form.dataset.factManual = '1';
+  if (e.target.id === 'foto-mov' && e.target.files[0]) { const a = e.target.files[0], fm = e.target.form; e.target.value = ''; await leerFoto(a, fm); return; }
   const f = e.target.closest('#f-mov, #f-pago'); if (f) actualizarForm(f);
   const fi = e.target.closest('#f-import'); if (fi) actualizarImport(fi);
   const fd = e.target.closest('#f-dividir'); if (fd) actualizarDividir(fd);
