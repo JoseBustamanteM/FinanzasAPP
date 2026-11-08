@@ -866,7 +866,10 @@ function formHTML(r, isTpl) {
     <div data-show="gasto ingreso"><label>Categoría<input name="categoria" list="dl-cat" value="${esc(r.categoria || '')}" placeholder="Ej: Comida"></label></div>
     <div data-show="gasto"><div class="seg">${Object.entries(MEDIOS).map(([k, v]) => `<label><input type="radio" name="medio" value="${k}" ${k === medio ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></div>
     ${tarjetaCampo(r)}
-    ${isTpl || r.pagoId ? '' : `<div data-fact><label>Se paga en el mes<select name="factMes">${[-2, -1, 0, 1, 2].map(d => shiftMes(mesFact, d)).map(v => `<option value="${v}" ${v === mesFact ? 'selected' : ''}>${mesLabel(v)}</option>`).join('')}</select></label></div>`}
+    ${isTpl || r.pagoId ? '' : `<div data-fact>${r.id ? '' : `<div class="two"><label>Cuotas<input name="cuotas" inputmode="numeric" placeholder="1"></label>
+      <label>Valor de cada cuota<input name="valorCuota" inputmode="numeric" placeholder="Automático"></label></div>
+      <p class="mut small" data-cuotas-info hidden></p>`}
+      <label><span data-fact-lb>Se paga en el mes</span><select name="factMes">${[-2, -1, 0, 1, 2].map(d => shiftMes(mesFact, d)).map(v => `<option value="${v}" ${v === mesFact ? 'selected' : ''}>${mesLabel(v)}</option>`).join('')}</select></label></div>`}
     <div data-show="transferencia"><label>Persona<input name="persona" list="dl-per" value="${esc(r.persona || '')}" placeholder="¿A quién?"></label></div>
     ${isTpl ? '' : `<div data-bencina class="two"><label>Litros<input name="litros" inputmode="decimal" value="${r.litros ? String(r.litros).replace('.', ',') : ''}" placeholder="Opcional"></label>
       <label>Kilometraje<input name="km" inputmode="numeric" value="${r.km ? fmtNum(r.km) : ''}" placeholder="Opcional"></label></div>
@@ -1113,6 +1116,17 @@ function actualizarForm(f) {
   const b = f.querySelector('[data-bencina]'); if (b) b.hidden = !(tipo === 'gasto' && isBencina(f.categoria.value));
   const a = f.querySelector('[data-atajo]'); if (a) a.hidden = !f.comoAtajo.checked;
   const fc = f.querySelector('[data-fact]'); if (fc) fc.hidden = !(tipo === 'gasto' && f.querySelector('input[name=medio]:checked')?.value === 'credito');
+  if (f.elements.cuotas) {
+    const n = parseMonto(f.elements.cuotas.value), monto = parseMonto(f.elements.monto.value), vc = parseMonto(f.elements.valorCuota.value);
+    const info = f.querySelector('[data-cuotas-info]'), enCuotas = n > 1;
+    f.elements.valorCuota.placeholder = enCuotas && monto ? fmtNum(Math.round(monto / n)) : 'Automático';
+    f.querySelector('[data-fact-lb]').textContent = enCuotas ? 'Primera cuota se paga en' : 'Se paga en el mes';
+    info.hidden = !enCuotas;
+    if (enCuotas) {
+      const total = (vc || Math.round(monto / n)) * n, interes = vc && monto ? total - monto : 0;
+      info.textContent = `${n} cuotas de ${clp(vc || Math.round(monto / n))} · total ${clp(total)}${interes > 0 ? ` (${clp(interes)} de interés)` : ''}. Quedará en Pagos → Tarjetas y la cuota avanza sola cada mes.`;
+    }
+  }
   const tj = f.querySelector('[data-tarjeta]');
   if (tj) {
     tj.hidden = !(tipo === 'pago_tarjeta' || (tipo === 'gasto' && f.querySelector('input[name=medio]:checked')?.value === 'credito'));
@@ -1145,6 +1159,18 @@ async function guardarForm(f) {
   if (id && S.items.get(id)?.cargo) rec.cargo = true;
   if (id && tipo === 'gasto' && S.items.get(id)?.div) rec.div = S.items.get(id).div;
   if (f.dataset.persona && tipo === 'ingreso') { rec.personaId = f.dataset.persona; rec.reembolso = true; }
+  const nCuotas = !id && !rec.pagoId && tipo === 'gasto' && base.medio === 'credito' ? parseMonto(g('cuotas')) : 0;
+  if (nCuotas > 1) {
+    if (nCuotas > 72) throw new Error('Revisa el número de cuotas');
+    if (!nombreTarjeta(rec.tarjetaId)) throw new Error('Elige la tarjeta de esta compra en cuotas');
+    const valor = parseMonto(g('valorCuota')) || Math.round(monto / nCuotas), desde = rec.factMes || rec.fecha.slice(0, 7);
+    const pag = { kind: 'pag', nombre: base.nota || base.categoria || 'Compra en cuotas', dia: pagoDeTarjeta(rec.tarjetaId)?.dia || +rec.fecha.slice(8, 10), tipo: 'gasto', categoria: base.categoria || 'Compras', medio: 'credito', tarjetaId: rec.tarjetaId, monto: valor, cuotasTotal: nCuotas, cuotasPrevias: 0, desde, compraFecha: rec.fecha, compraTotal: monto };
+    if (base.nota) pag.nota = base.nota;
+    await saveRec(pag);
+    if (f.comoAtajo?.checked) await saveRec({ kind: 'tpl', nombre: g('nombreAtajo') || base.categoria || TIPOS[tipo], ...base });
+    closeSheet(); S.view = 'pagos'; S.pagosVista = 'tarjetas'; S.mes = desde; renderMain();
+    toast(`Compra en ${nCuotas} cuotas de ${clp(valor)} guardada`); return;
+  }
   if (tipo === 'gasto' && isBencina(base.categoria)) { const l = parseDec(g('litros')), km = parseMonto(g('km')); if (l) rec.litros = l; if (km) rec.km = km; }
   const pagoT = !id && tipo === 'pago_tarjeta' && rec.tarjetaId ? await registrarPagoTarjeta(rec) : null;
   if (pagoT) pagoMes = pagoT.mov.pagoMes || pagoMes; else await saveRec(rec);
@@ -1280,8 +1306,8 @@ document.addEventListener('input', e => {
   const fi = e.target.closest('#f-import');
   if (fi) { if (e.target.name === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; } actualizarImport(fi); return; }
   const f = e.target.closest('#f-mov, #f-pago'); if (!f) return;
-  if (e.target.name === 'monto' || e.target.name === 'km') { const n = parseMonto(e.target.value); e.target.value = n ? fmtNum(n) : ''; }
-  if (e.target.name === 'categoria') actualizarForm(f);
+  if (['monto', 'km', 'valorCuota'].includes(e.target.name)) { const n = parseMonto(e.target.value); e.target.value = n ? fmtNum(n) : ''; }
+  if (['categoria', 'monto', 'cuotas', 'valorCuota'].includes(e.target.name)) actualizarForm(f);
 });
 
 // ---------- Privacidad y sincronización periódica
