@@ -1153,7 +1153,7 @@ async function leerFoto(archivo, f) {
     if (r.valorCuota) f.elements.valorCuota.value = fmtNum(r.valorCuota);
     else if (r.sinInteres) f.elements.valorCuota.value = '';
     actualizarForm(f);
-    const leido = [r.monto && clp(r.monto), r.fecha && r.fecha.split('-').reverse().join('/'), r.cuotas && `${r.cuotas} cuotas`, r.valorCuota && `cuota de ${clp(r.valorCuota)}`].filter(Boolean).join(' · ');
+    const leido = [r.monto && clp(r.monto), r.fecha && r.fecha.split('-').reverse().join('/'), r.cuotas && (r.cuotaActual ? `cuota ${r.cuotaActual} de ${r.cuotas}` : `${r.cuotas} cuotas`), r.valorCuota && `cuota de ${clp(r.valorCuota)}`].filter(Boolean).join(' · ');
     const falta = r.cuotas ? '' : r.sinInteres ? ' Es sin interés: escribe el número de cuotas y el valor de cada una se calcula solo.' : ' Si la compraste en cuotas, escribe cuántas.';
     est.textContent = `Leído: ${leido || 'solo el comercio'}.${falta} Revisa los datos y la tarjeta antes de guardar.`;
     if (!r.cuotas) f.elements.cuotas.focus();
