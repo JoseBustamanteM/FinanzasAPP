@@ -284,6 +284,19 @@ function resumenPagos(m) {
   const pend = propios.filter(x => !x.mov || saldoTarjeta(x.p, m) > 0);
   return { lista, pend, porPagar: pend.reduce((a, x) => a + falta(x), 0), variables: pend.filter(x => !falta(x)).length, pagado: propios.reduce((a, x) => a + pagadoEnMes(x.p, m), 0) };
 }
+// Todo lo que falta pagar en el mes: tarjetas, pagos recurrentes y lo que le debo a otras personas
+function porPagarDelMes(m) {
+  const rp = resumenPagos(m), falta = x => (x.mov ? saldoTarjeta(x.p, m) : montoPago(x.p, m));
+  // Las cuotas y cargos de una tarjeta ya van dentro de lo que falta pagar de esa tarjeta
+  const rec = rp.pend.filter(x => !esCargoTarjeta(x.p) && (x.p.tipo !== 'pago_tarjeta' || !nombreTarjeta(x.p.tarjetaId))).reduce((a, x) => a + falta(x), 0);
+  const tarj = detalleTarjetas(m).reduce((a, t) => a + Math.max(0, t.deuda), 0);
+  const cuentas = cuentaDeudas(m), yo = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
+  const pagado = rp.pagado + cuentas.reduce((a, c) => a + sum(c.pagosMes), 0);
+  return { tarj, rec, yo, total: tarj + rec + yo, pagado, variables: rp.variables };
+}
+// Pagos recurrentes sin tarjeta que aún no se pagan: ya son gasto del mes, aunque falte marcarlos
+const pendientesRecurrentes = m => resumenPagos(m).pend.filter(x => x.p.tipo !== 'pago_tarjeta' && !esCargoTarjeta(x.p) && !x.mov && montoPago(x.p, m))
+  .map(x => ({ tipo: x.p.tipo, categoria: x.p.categoria || (x.p.tipo === 'gasto' ? 'Cuentas' : ''), persona: x.p.persona, monto: montoPago(x.p, m), pendiente: true }));
 // Registra el pago de una tarjeta. Si cubre el total, deja pagadas todas sus cuotas de ese mes.
 async function registrarPagoTarjeta(rec) {
   const t = rec.tarjetaId;
@@ -593,8 +606,10 @@ function rendimientos() {
 const VIEWS = {
   inicio() {
     const ms = delMes(S.mes);
-    const gastos = gastosDelMes(S.mes), ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
-      transf = ms.filter(x => x.tipo === 'transferencia' && !x.pagoDeuda), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
+    const pendRec = pendientesRecurrentes(S.mes), gPend = pendRec.filter(x => x.tipo === 'gasto'), tPend = pendRec.filter(x => x.tipo === 'transferencia');
+    const gastos = [...gastosDelMes(S.mes), ...gPend], ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
+      transf = [...ms.filter(x => x.tipo === 'transferencia' && !x.pagoDeuda), ...tPend], pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
+    const GP = sum(gPend), TP = sum(tPend), pp = porPagarDelMes(S.mes);
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
     const detalle = detalleTarjetas(S.mes), deuda = detalle.reduce((a, t) => a + Math.max(0, t.deuda), 0);
@@ -607,12 +622,14 @@ const VIEWS = {
     const ts = tpls();
     return `
       <div class="card"><div class="kpis">
-        <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div></div>
-        <div class="kpi"><div class="mut small">Gastos</div><div class="v">${clp(G)}</div></div>
+        <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div>${GP + TP ? `<div class="mut small">Ya descuenta ${clp(GP + TP)} de pagos que aún no marcas</div>` : ''}</div>
+        <div class="kpi"><div class="mut small">Gastos</div><div class="v">${clp(G)}</div>${GP ? `<div class="mut small">${clp(GP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Ingresos</div><div class="v">${clp(I)}</div></div>
-        <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div></div>
+        <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div>${TP ? `<div class="mut small">${clp(TP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Movimientos</div><div class="v">${ms.length}</div></div>
         ${R ? `<div class="kpi wide"><div class="mut small">Reembolsos recibidos</div><div class="v">${clp(R)}</div></div>` : ''}
+        <div class="kpi wide"><div class="mut small">Falta pagar este mes</div><div class="v ${pp.total ? 'bad' : 'ok'}">${clp(pp.total)}</div>
+          <div class="mut small">${[pp.tarj && `Tarjetas ${clp(pp.tarj)}`, pp.rec && `Recurrentes ${clp(pp.rec)}`, pp.yo && `Yo debo ${clp(pp.yo)}`].filter(Boolean).join(' · ') || 'Todo pagado'}${pp.variables ? ` · ${pp.variables} sin monto fijo` : ''}</div></div>
       </div></div>
       ${rp.lista.length ? `<div class="card"><h3>Pagos del mes</h3>
         <p class="small">${rp.pend.length ? `<b>${rp.pend.length} pendiente${rp.pend.length === 1 ? '' : 's'}</b>${rp.porPagar ? ` · ${clp(rp.porPagar)}` : ''}${rp.variables ? ` · ${rp.variables} sin monto fijo` : ''}` : '<span class="ok">✓ Todos pagados</span>'}</p>
@@ -631,6 +648,7 @@ const VIEWS = {
         <div class="mut small">Compras y cuotas ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
       <p class="mut small">Las compras con crédito cuentan como gasto el día que compras; las cuotas y pagos fijos, en el mes que se cobran. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
       ${gastos.length ? `<div class="card"><h3>Gastos por categoría</h3>${bars(group(gastos, x => x.categoria || 'Otros'), G)}</div>` : ''}
+      ${GP ? `<p class="mut small" style="margin:-4px 4px 12px">Los gastos incluyen los pagos recurrentes del mes aunque aún no los marques como pagados.</p>` : ''}
       ${transf.length ? `<div class="card"><h3>Transferencias por persona</h3>${bars(group(transf, x => x.persona || 'Sin nombre'), T)}</div>` : ''}
       ${ben.length || rend.length ? `<div class="card"><h3>⛽ Bencina</h3><div class="kpis">
         <div class="kpi"><div class="mut small">Gastado en el mes</div><div class="v">${clp(sum(ben))}</div></div>
@@ -653,10 +671,11 @@ const VIEWS = {
     return html;
   },
   pagos() {
-    const r = resumenPagos(S.mes), atraso = atrasados(S.mes), vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p));
+    const r = resumenPagos(S.mes), atraso = atrasados(S.mes), vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p)), pp = porPagarDelMes(S.mes);
     return `<div class="card"><div class="kpis">
-        <div class="kpi"><div class="mut small">Por pagar${r.variables ? ` (+${r.variables} sin monto fijo)` : ''}</div><div class="v ${r.porPagar ? 'bad' : ''}">${clp(r.porPagar)}</div></div>
-        <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
+        <div class="kpi"><div class="mut small">Por pagar${pp.variables ? ` (+${pp.variables} sin monto fijo)` : ''}</div><div class="v ${pp.total ? 'bad' : ''}">${clp(pp.total)}</div></div>
+        <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(pp.pagado)}</div></div>
+        ${pp.total ? `<div class="kpi wide"><div class="mut small">${[pp.tarj && `Tarjetas ${clp(pp.tarj)}`, pp.rec && `Recurrentes ${clp(pp.rec)}`, pp.yo && `Yo debo ${clp(pp.yo)}`].filter(Boolean).join(' · ')}</div></div>` : ''}
         ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
       </div></div>
       <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes', medeben: 'Me deben', yodebo: 'Yo debo' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
