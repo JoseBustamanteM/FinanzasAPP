@@ -251,12 +251,32 @@ function atrasados(m) {
   }
   return out;
 }
+// ---------- Yo debo: líneas de la tarjeta de otra persona que me corresponden.
+// Cada cuota cuenta como gasto mío en el mes que se cobra; lo que le pago solo baja la deuda.
+const deudas = () => [...S.items.values()].filter(x => x.kind === 'deu').sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '') || a.nombre.localeCompare(b.nombre));
+const deudasDelMes = m => deudas().filter(d => nombrePersona(d.personaId) && pagoVisible(d, m));
+const nombreDeuda = (d, m) => d.cuotasTotal > 1 ? `${d.nombre} · Cuota ${cuotaDelMes(d, m)} de ${d.cuotasTotal}` : d.nombre;
+function cuentaDeudas(m) {
+  const pagosA = movs().filter(x => x.pagoDeuda && x.personaId);
+  return personas().map(t => {
+    const suyas = deudas().filter(d => d.personaId === t.id), pagos = pagosA.filter(x => x.personaId === t.id);
+    let previo = 0;
+    for (const d of suyas) {
+      const fin = shiftMes(m, -1), ultimo = ultimoMesCuota(d) < fin ? ultimoMesCuota(d) : fin;
+      if (d.desde <= ultimo) previo += d.monto * (difMes(d.desde, ultimo) + 1);
+    }
+    previo -= sum(pagos.filter(x => x.fecha.slice(0, 7) < m));
+    const delMes = suyas.filter(d => pagoVisible(d, m)), pagosMes = pagos.filter(x => x.fecha.slice(0, 7) === m);
+    return { t, delMes, pagosMes, previo, total: previo + sum(delMes) - sum(pagosMes) };
+  });
+}
 const textoAtrasados = lista => lista.slice(0, 4).map(a => `${a.p.nombre} (${mesLabel(a.mes)})`).join(', ') + (lista.length > 4 ? ` y ${lista.length - 4} más` : '');
 // Las cuotas y pagos fijos de una tarjeta son gasto del mes en que se cobran, aunque aún no se marquen
 function gastosDelMes(m) {
   const propios = delMes(m).filter(x => x.tipo === 'gasto' && !(x.pagoId && esCargoTarjeta(S.items.get(x.pagoId) || {})));
   const cargos = pagos().filter(p => esCargoTarjeta(p) && pagoVisible(p, m)).map(p => ({ tipo: 'gasto', medio: 'credito', categoria: p.categoria, tarjetaId: p.tarjetaId, monto: pagoMov(p, m)?.monto || p.monto }));
-  return [...propios, ...cargos];
+  const deben = deudasDelMes(m).map(d => ({ tipo: 'gasto', medio: 'deuda', categoria: d.categoria || 'Deudas', monto: d.monto }));
+  return [...propios, ...cargos, ...deben];
 }
 function resumenPagos(m) {
   const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || pagoVisible(x.p, m));
@@ -389,7 +409,7 @@ async function sync() {
     }
     await DB.put('meta', max, 'lastSync');
     setSync('Sincronizado · ' + new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' }));
-    if (changed && S.screen === 'main' && !$('#modal').innerHTML && S.view !== 'revision') renderMain();
+    if (changed && S.screen === 'main' && !$('#modal').innerHTML && S.view !== 'revision' && S.view !== 'revdeuda') renderMain();
   } catch (e) {
     console.warn(e);
     if (e.status === 400 || e.status === 401 || e.status === 403) {
@@ -555,7 +575,7 @@ function renderMain() {
       : `<header class="top"><div class="mes">${TABS[S.view]?.[1] || 'Revisar estado de cuenta'}</div><span></span></header>`}
     <div class="sync" id="sync">${esc(S.syncMsg)}</div>
     <main>${VIEWS[S.view]()}</main>
-    ${S.view !== 'ajustes' && S.view !== 'revision' ? `<button class="fab" data-act="nuevo" aria-label="Nuevo movimiento">+</button>` : ''}
+    ${S.view !== 'ajustes' && S.view !== 'revision' && S.view !== 'revdeuda' ? `<button class="fab" data-act="nuevo" aria-label="Nuevo movimiento">+</button>` : ''}
     <nav class="tabs">${Object.entries(TABS).map(([k, [i, t]]) => `<button data-act="tab" data-v="${k}" class="${S.view === k ? 'on' : ''}"><i>${i}</i>${t}</button>`).join('')}</nav>`;
 }
 
@@ -574,7 +594,7 @@ const VIEWS = {
   inicio() {
     const ms = delMes(S.mes);
     const gastos = gastosDelMes(S.mes), ingresos = ms.filter(x => x.tipo === 'ingreso' && !x.reembolso), reembolsos = ms.filter(x => x.reembolso),
-      transf = ms.filter(x => x.tipo === 'transferencia'), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
+      transf = ms.filter(x => x.tipo === 'transferencia' && !x.pagoDeuda), pagos = ms.filter(x => x.tipo === 'pago_tarjeta');
     const G = sum(gastos), I = sum(ingresos), T = sum(transf), P = sum(pagos);
     const credMes = sum(gastos.filter(x => x.medio === 'credito'));
     const detalle = detalleTarjetas(S.mes), deuda = detalle.reduce((a, t) => a + Math.max(0, t.deuda), 0);
@@ -639,11 +659,11 @@ const VIEWS = {
         <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(r.pagado)}</div></div>
         ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
       </div></div>
-      <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes', medeben: 'Me deben' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
+      <div class="vistas">${Object.entries({ tarjetas: 'Tarjetas', recurrentes: 'Recurrentes', medeben: 'Me deben', yodebo: 'Yo debo' }).map(([k, v]) => `<button class="vista ${k === vista ? 'on' : ''}" data-act="vista-pagos" data-v="${k}">${v}</button>`).join('')}</div>
       ${vista === 'tarjetas' ? `<button class="btn" data-act="nueva-compra">+ Agregar compra con tarjeta</button>
         <label class="btn sec" style="color:var(--tx)">📄 Importar estado de cuenta<input type="file" accept="application/pdf,.pdf" id="imp-eecc" hidden></label>
         ${vistaTarjetas(r.lista, S.mes)}`
-      : vista === 'medeben' ? vistaMeDeben(S.mes) : `<button class="btn" data-act="nuevo-pago">+ Nuevo pago recurrente</button>
+      : vista === 'medeben' ? vistaMeDeben(S.mes) : vista === 'yodebo' ? vistaYoDebo(S.mes) : `<button class="btn" data-act="nuevo-pago">+ Nuevo pago recurrente</button>
         ${recurrentes.map(x => filaPago(x, S.mes)).join('') || '<div class="empty">Agrega lo que pagas todos los meses sin tarjeta de crédito: arriendo, luz, internet…</div>'}`}`;
   },
   revision() {
@@ -673,6 +693,23 @@ const VIEWS = {
       </div>`).join('')}
       <div class="err" id="err"></div>
       <div class="acts"><button type="button" class="btn sec" data-act="cancelar-import">Cancelar</button><button class="btn">Confirmar y guardar</button></div>
+    </form>`;
+  },
+  revdeuda() {
+    const r = S.impDeuda, ps = personas(), lineas = r.lineas.map((l, i) => [l, i]).filter(([l]) => !l.pago);
+    return `<form id="f-deudas" autocomplete="off">
+      <div class="card"><h3>Estado de cuenta de otra persona</h3>
+        <p class="mut small">${esc(r.nombre)} · vence el ${esc(r.vence.split('-').reverse().join('/'))}. Solo se guardan las líneas que marques; el PDF no sale de tu dispositivo.</p>
+        <label>¿De quién es?<select name="personaId">
+          ${ps.map(t => `<option value="${esc(t.id)}" ${t.id === r.personaId ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+          <option value="__nueva" ${ps.length ? '' : 'selected'}>+ Nueva persona…</option></select></label>
+        <div data-persona-nueva><label>Nombre<input name="personaNueva" maxlength="40" placeholder="Ej: Ana"></label></div>
+        <label>Cuenta como gasto en<select name="mes">${opcionesMes(r.mes, r.mes)}</select></label>
+        <div class="note" id="deu-res"></div></div>
+      <p class="mut small">Marca lo que es tuyo y elige cuánto te corresponde: completo, un porcentaje o un monto por cuota.</p>
+      ${lineas.map(([l, i]) => filaDeuda(l, i)).join('') || '<div class="empty">No encontré compras en este estado de cuenta.</div>'}
+      <div class="err" id="err"></div>
+      <div class="acts"><button type="button" class="btn sec" data-act="cancelar-deuda">Cancelar</button><button class="btn">Guardar lo mío</button></div>
     </form>`;
   },
   atajos() {
@@ -721,6 +758,116 @@ function vistaMeDeben(m) {
       ${c.delMes.map(d => `<div class="bar-l small"><span>${esc(d.nombre)}${d.pct ? ` (${String(d.pct).replace('.', ',')}%)` : ''}</span><span>${clp(d.monto)}</span></div>`).join('')}
       ${c.abonosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💰</div><div class="tx"><b>Pago recibido</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
       ${c.total > 0 ? `<button class="btn" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago recibido</button>` : ''}</section>`).join('') || '<div class="empty">Nadie te debe en este mes.</div>'}`;
+}
+function vistaYoDebo(m) {
+  const cuentas = cuentaDeudas(m), total = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
+  const conMovimiento = cuentas.filter(c => c.total || c.delMes.length || c.pagosMes.length);
+  return `<div class="card"><div class="kpi"><div class="mut small">Debo en total</div><div class="v ${total ? 'bad' : ''}">${clp(total)}</div></div>
+      <p class="mut small">Lo que te corresponde de la tarjeta de otra persona cuenta como gasto en el mes que se cobra. Lo que le pagas solo baja la deuda.</p></div>
+    <label class="btn" style="color:var(--on-acc)">📄 Subir estado de cuenta de otra persona<input type="file" accept="application/pdf,.pdf" id="imp-deuda" hidden></label>
+    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'bad' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
+      ${c.previo ? `<div class="bar-l small"><span>${c.previo > 0 ? 'Pendiente de meses anteriores' : 'A favor de meses anteriores'}</span><span>${clp(Math.abs(c.previo))}</span></div>` : ''}
+      ${c.delMes.map(d => `<button class="row" data-act="editar-deuda" data-id="${esc(d.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(nombreDeuda(d, m))}</b><span>${d.pct ? `Tu parte: ${String(d.pct).replace('.', ',')}% de ${clp(d.lineaMonto)}` : d.lineaMonto && d.lineaMonto !== d.monto ? `Tu parte de ${clp(d.lineaMonto)}` : 'Completo'}</span></div><div class="am">${clp(d.monto)}</div></button>`).join('')}
+      ${c.pagosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💸</div><div class="tx"><b>Le pagaste</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
+      ${c.total > 0 ? `<button class="btn" data-act="pagar-deuda" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago a ${esc(c.t.nombre)}</button>` : ''}</section>`).join('') || '<div class="empty">No le debes a nadie en este mes.</div>'}`;
+}
+// Una línea del estado de cuenta ajeno que ya está registrada como deuda de esa persona
+function deudaIgual(l, personaId, mes, usados) {
+  return deudas().find(d => d.personaId === personaId && !usados.has(d.id) && (d.cuotasTotal || 1) === (l.de || 1) && Math.abs((d.lineaMonto || d.monto) - l.monto) <= 50
+    && (d.fecha === l.fecha || mismoNombre(d.nombre, l.desc) || nombreParecido(d.nombre, l.desc)) && ultimoMesCuota(d) >= shiftMes(mes, -2));
+}
+function marcarDeudasExistentes(r, personaId) {
+  const usados = new Set();
+  for (const l of r.lineas) {
+    const d = !l.pago && personaId && deudaIgual(l, personaId, r.mes, usados);
+    l.deudaId = d ? d.id : ''; if (d) usados.add(d.id);
+  }
+}
+function filaDeuda(l, i) {
+  const cuota = l.de > 1 ? (l.n === 0 ? `${l.de} cuotas · parte en ${mesLabel(l.primerMes || shiftMes(S.impDeuda.mes, 1))}` : `Cuota ${l.n} de ${l.de}`) : 'Una cuota';
+  return `<div class="imp deu" data-i="${i}">
+    <label class="chk"><input type="checkbox" name="mio" ${l.deudaId ? 'disabled' : ''}> <b>${esc(l.desc)}</b></label>
+    <div class="mut small">${esc(l.fecha.split('-').reverse().join('/'))} · ${esc(cuota)} · ${clp(l.monto)}${l.de > 1 ? ' por cuota' : ''}</div>
+    ${l.deudaId ? '<p class="small ok">✓ Ya la tienes registrada.</p>' : `<div class="two" data-parte hidden><label><span class="lb">Te corresponde</span><select name="parte">
+        <option value="todo">Completo</option><option value="pct">Porcentaje</option><option value="monto">Monto por cuota</option></select></label>
+      <label><span class="lb" data-lb>Valor</span><input name="valor" inputmode="decimal" disabled></label></div>
+      <p class="small" data-tuyo hidden></p>`}
+  </div>`;
+}
+const parteDeuda = (l, el) => {
+  const parte = el.querySelector('[name=parte]').value, v = el.querySelector('[name=valor]').value;
+  if (parte === 'pct') { const pct = parseDec(v); return { monto: Math.round(l.monto * pct / 100), pct }; }
+  if (parte === 'monto') return { monto: parseMonto(v) };
+  return { monto: l.monto };
+};
+function actualizarRevDeuda(f) {
+  const r = S.impDeuda; let total = 0, n = 0;
+  f.querySelector('[data-persona-nueva]').hidden = f.elements.personaId.value !== '__nueva';
+  f.querySelectorAll('.imp.deu').forEach(el => {
+    const l = r.lineas[+el.dataset.i], mio = el.querySelector('[name=mio]'), box = el.querySelector('[data-parte]');
+    if (!box) return;
+    box.hidden = !mio.checked; el.querySelector('[data-tuyo]').hidden = !mio.checked;
+    const parte = el.querySelector('[name=parte]').value, input = el.querySelector('[name=valor]');
+    input.disabled = parte === 'todo'; el.querySelector('[data-lb]').textContent = parte === 'pct' ? '%' : parte === 'monto' ? 'Monto' : 'Valor';
+    if (parte === 'todo') input.value = '';
+    if (!mio.checked) return;
+    const { monto } = parteDeuda(l, el); n++; total += l.de > 1 && l.n === 0 ? 0 : monto;
+    el.querySelector('[data-tuyo]').textContent = `Te corresponde ${clp(monto)}${l.de > 1 ? ` en cada una de ${l.n > 0 ? `las ${l.de - l.n + 1} cuotas que quedan` : `las ${l.de} cuotas`}` : ''}.`;
+  });
+  $('#deu-res').textContent = n ? `${n} línea${n === 1 ? '' : 's'} tuya${n === 1 ? '' : 's'} · ${clp(total)} en ${mesLabel(f.elements.mes.value)}` : 'Marca las líneas que son tuyas.';
+}
+async function guardarDeudas(f) {
+  const r = S.impDeuda, mes = f.elements.mes.value, salto = difMes(r.mes, mes);
+  let personaId = f.elements.personaId.value;
+  if (personaId === '__nueva') {
+    const nombre = f.elements.personaNueva.value.trim();
+    if (!nombre) throw new Error('Escribe el nombre de la persona');
+    personaId = (personas().find(t => mismoNombre(t.nombre, nombre)) || await saveRec({ kind: 'per', nombre })).id;
+  }
+  if (!personaId) throw new Error('Elige de quién es este estado de cuenta');
+  const elegidas = [...f.querySelectorAll('.imp.deu')].filter(el => el.querySelector('[name=mio]')?.checked);
+  if (!elegidas.length) throw new Error('Marca al menos una línea que sea tuya');
+  for (const el of elegidas) {
+    const l = r.lineas[+el.dataset.i], { monto, pct } = parteDeuda(l, el);
+    if (!(monto > 0)) throw new Error(`Revisa cuánto te corresponde de "${l.desc}"`);
+    const enCuotas = l.de > 1;
+    await saveRec({ kind: 'deu', personaId, nombre: l.desc, fecha: l.fecha, categoria: 'Deudas', monto, lineaMonto: l.monto, ...(pct ? { pct } : {}),
+      cuotasTotal: enCuotas ? l.de : 1, cuotasPrevias: enCuotas && l.n > 0 ? l.n - 1 : 0,
+      desde: enCuotas && l.n === 0 ? shiftMes(l.primerMes || shiftMes(r.mes, 1), salto) : mes });
+  }
+  // Si el banco indica otra cuota para una deuda ya registrada, manda el banco
+  for (const l of r.lineas.filter(x => x.deudaId && x.n > 0 && x.de > 1)) {
+    const d = S.items.get(l.deudaId); if (!d) continue;
+    const previas = l.n - 1 - difMes(d.desde, mes);
+    if (cuotaDelMes(d, mes) !== l.n) await saveRec(previas >= 0 ? { ...d, cuotasPrevias: previas } : { ...d, desde: mes, cuotasPrevias: l.n - 1 });
+  }
+  S.impDeuda = null; S.mes = mes; S.view = 'pagos'; S.pagosVista = 'yodebo'; renderMain(); window.scrollTo(0, 0);
+  toast(`${elegidas.length} línea${elegidas.length === 1 ? '' : 's'} guardada${elegidas.length === 1 ? '' : 's'} en Yo debo`);
+}
+function abrirDeuda(d) {
+  openSheet(`<form id="f-deuda" data-id="${esc(d.id)}" autocomplete="off"><h2>Deuda con ${esc(nombrePersona(d.personaId))}</h2>
+    <label>Nombre<input name="nombre" required maxlength="60" value="${esc(d.nombre)}"></label>
+    <label>Te corresponde por cuota<input name="monto" class="big" inputmode="numeric" value="${fmtNum(d.monto)}"></label>
+    ${d.lineaMonto ? `<p class="mut small">Valor de la línea en su estado de cuenta: ${clp(d.lineaMonto)}${d.cuotasTotal > 1 ? ' por cuota' : ''}.</p>` : ''}
+    ${d.cuotasTotal > 1 ? `<div class="two"><label>Cuota de este mes<input name="cuotaProx" inputmode="numeric" value="${cuotaDelMes(d, S.mes)}"></label>
+      <label>Total de cuotas<input name="cuotaTotal" inputmode="numeric" value="${d.cuotasTotal}"></label></div>` : ''}
+    <div class="err" id="err"></div>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
+    <button type="button" class="btn danger" data-act="borrar-deuda" data-id="${esc(d.id)}">Eliminar</button></form>`);
+}
+async function guardarDeuda(f) {
+  const d = S.items.get(f.dataset.id); if (!d) return;
+  const monto = parseMonto(f.elements.monto.value);
+  if (!(monto > 0)) throw new Error('Ingresa cuánto te corresponde');
+  const rec = { ...d, nombre: f.elements.nombre.value.trim() || d.nombre, monto };
+  if (monto !== d.monto) delete rec.pct;
+  if (f.elements.cuotaTotal) {
+    const total = parseMonto(f.elements.cuotaTotal.value), prox = parseMonto(f.elements.cuotaProx.value) || 1;
+    if (!(total >= 1) || prox > total) throw new Error('Revisa las cuotas');
+    const previas = prox - 1 - difMes(rec.desde, S.mes);
+    Object.assign(rec, { cuotasTotal: total }, previas >= 0 ? { cuotasPrevias: previas } : { desde: S.mes, cuotasPrevias: prox - 1 });
+  }
+  await saveRec(rec); closeSheet(); renderMain(); toast('Deuda actualizada');
 }
 // ---------- Dividir un gasto
 function filaDividir(parte, modo) {
@@ -893,7 +1040,7 @@ function formHTML(r, isTpl) {
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   const pers = [...new Set(movs().map(x => x.persona).filter(Boolean))];
   const mesFact = r.factMes || (r.id && r.fecha ? r.fecha.slice(0, 7) : S.mes);
-  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" autocomplete="off">
+  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" data-deuda="${r.pagoDeuda ? 1 : ''}" autocomplete="off">
     <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
     ${!isTpl && !r.id && !r.pagoId ? `<label class="btn sec foto-btn">📷 Leer foto de la compra<input type="file" id="foto-mov" accept="image/*" hidden></label>
@@ -1030,6 +1177,14 @@ async function cargarEstado(file, password) {
   }
   const r = FinImport.analizar(filas);
   if (!r) throw new Error('No reconozco este formato. Por ahora se leen CMR Falabella y BCI; agrega tus pagos a mano.');
+  if (S.impModo === 'deuda') {
+    // Se propone la persona a la que ya le debías algo de esta tarjeta
+    const conDeuda = personas().filter(t => deudas().some(d => d.personaId === t.id));
+    r.personaId = (conDeuda.length === 1 ? conDeuda[0] : personas().length === 1 ? personas()[0] : conDeuda[0])?.id || '';
+    marcarDeudasExistentes(r, r.personaId);
+    S.impDatos = null; S.impModo = ''; closeSheet(); S.impDeuda = r; S.view = 'revdeuda'; renderMain(); window.scrollTo(0, 0);
+    actualizarRevDeuda($('#f-deudas')); return;
+  }
   // Reimportar: lo que ya existe queda sin registrar. Solo es igual si coincide en tarjeta y compra, y cada registro se usa una vez.
   const tjProbable = tarjetas().find(t => r.clave.test(t.nombre))?.id, usados = new Set();
   for (const l of r.lineas) {
@@ -1229,6 +1384,8 @@ async function guardarForm(f) {
   if (id && S.items.get(id)?.cargo) rec.cargo = true;
   if (id && tipo === 'gasto' && S.items.get(id)?.div) rec.div = S.items.get(id).div;
   if (f.dataset.persona && tipo === 'ingreso') { rec.personaId = f.dataset.persona; rec.reembolso = true; }
+  // Un pago de lo que debo no es un gasto nuevo: esas cuotas ya contaron en su mes
+  if (f.dataset.persona && f.dataset.deuda && tipo === 'transferencia') { rec.personaId = f.dataset.persona; rec.pagoDeuda = true; }
   const nCuotas = !id && !rec.pagoId && tipo === 'gasto' && base.medio === 'credito' ? parseMonto(g('cuotas')) : 0;
   if (nCuotas > 1) {
     if (nCuotas > 72) throw new Error('Revisa el número de cuotas');
@@ -1291,6 +1448,7 @@ document.addEventListener('click', async e => {
       case 'borrar-persona': {
         const saldo = cuentaPersonas(hoy().slice(0, 7)).find(c => c.t.id === el.dataset.id)?.total || 0;
         if (saldo) { $('#err').textContent = `Aún tiene un saldo de ${clp(saldo)}. Regístralo o quita sus divisiones antes de eliminarla.`; break; }
+        if (deudas().some(d => d.personaId === el.dataset.id)) { $('#err').textContent = 'Tienes deudas registradas con esta persona en Yo debo. Elimínalas antes de eliminarla.'; break; }
         if (await confirmar('¿Eliminar persona?', 'Sus pagos recibidos se conservan como movimientos.', 'Eliminar', true)) { await delRec(el.dataset.id); closeSheet(); renderMain(); }
         break;
       }
@@ -1305,6 +1463,17 @@ document.addEventListener('click', async e => {
       case 'editar-atajo': abrirForm(S.items.get(el.dataset.id), true); break;
       case 'usar': await usarAtajo(el.dataset.id); break;
       case 'cancelar-import': S.imp = null; S.view = 'pagos'; renderMain(); break;
+      case 'cancelar-deuda': S.impDeuda = null; S.view = 'pagos'; S.pagosVista = 'yodebo'; renderMain(); break;
+      case 'editar-deuda': { const d = S.items.get(el.dataset.id); if (d) abrirDeuda(d); break; }
+      case 'borrar-deuda': {
+        const d = S.items.get(el.dataset.id);
+        if (d && await confirmar('¿Eliminar deuda?', 'Se quita de todos los meses. Los pagos que ya le hiciste se conservan.', 'Eliminar', true)) {
+          await delRec(d.id); closeSheet(); renderMain();
+          toast('Deuda eliminada', { label: 'Deshacer', fn: async () => { await saveRec(d); renderMain(); } }, 6000);
+        }
+        break;
+      }
+      case 'pagar-deuda': abrirForm({ tipo: 'transferencia', monto: +el.dataset.monto, persona: nombrePersona(el.dataset.id), personaId: el.dataset.id, pagoDeuda: true, nota: 'Pago de lo que le debo', fecha: hoy() }); break;
       case 'nueva-tarjeta': abrirTarjetaForm(); break;
       case 'editar-tarjeta': abrirTarjetaForm(S.items.get(el.dataset.id)); break;
       case 'borrar-tarjeta': if (await confirmar('¿Eliminar tarjeta?', 'Sus compras y pagos se conservan, pero quedan como "Sin tarjeta asignada".', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
@@ -1350,6 +1519,8 @@ document.addEventListener('submit', async e => {
     else if (f.id === 'f-import') await guardarImport(f);
     else if (f.id === 'f-dividir') await guardarDividir(f);
     else if (f.id === 'f-persona') await guardarPersona(f);
+    else if (f.id === 'f-deudas') await guardarDeudas(f);
+    else if (f.id === 'f-deuda') await guardarDeuda(f);
     else if (f.id === 'f-clave') await cargarEstado(null, f.clave.value);
     else if (f.id === 'f-login') { if (btn) btn.textContent = 'Ingresando…'; S.loginMsg = ''; await ingresar(f.email.value.trim(), f.pw.value); }
     else if (f.id === 'f-mfa') { if (btn) btn.textContent = 'Verificando…'; await verificarCodigo(f.code.value); }
@@ -1370,11 +1541,25 @@ document.addEventListener('change', async e => {
   const f = e.target.closest('#f-mov, #f-pago'); if (f) actualizarForm(f);
   const fi = e.target.closest('#f-import'); if (fi) actualizarImport(fi);
   const fd = e.target.closest('#f-dividir'); if (fd) actualizarDividir(fd);
-  if (e.target.id === 'imp-eecc' && e.target.files[0]) { const a = e.target.files[0]; e.target.value = ''; try { await cargarEstado(a); } catch (ex) { toast(ex.message, null, 6000); } }
+  const fdeu = e.target.closest('#f-deudas');
+  if (fdeu) {
+    if (e.target.name === 'personaId') {
+      // Al cambiar de persona se vuelve a revisar qué líneas ya estaban registradas
+      const marcadas = [...fdeu.querySelectorAll('.imp.deu')].filter(el => el.querySelector('[name=mio]')?.checked).map(el => el.dataset.i);
+      S.impDeuda.personaId = e.target.value === '__nueva' ? '' : e.target.value; marcarDeudasExistentes(S.impDeuda, S.impDeuda.personaId);
+      const nuevo = fdeu.elements.personaNueva.value, mes = fdeu.elements.mes.value;
+      renderMain(); const f2 = $('#f-deudas'); f2.elements.personaId.value = e.target.value; f2.elements.personaNueva.value = nuevo; f2.elements.mes.value = mes;
+      marcadas.forEach(i => { const c = f2.querySelector(`.imp.deu[data-i="${i}"] [name=mio]`); if (c && !c.disabled) c.checked = true; });
+      actualizarRevDeuda(f2);
+    } else actualizarRevDeuda(fdeu);
+  }
+  if ((e.target.id === 'imp-eecc' || e.target.id === 'imp-deuda') && e.target.files[0]) { const a = e.target.files[0]; S.impModo = e.target.id === 'imp-deuda' ? 'deuda' : ''; e.target.value = ''; try { await cargarEstado(a); } catch (ex) { toast(ex.message, null, 6000); } }
   if (e.target.id === 'imp' && e.target.files[0]) { try { await importar(e.target.files[0]); } catch (ex) { toast(ex.message); } e.target.value = ''; }
 });
 document.addEventListener('input', e => {
   const fd = e.target.closest('#f-dividir'); if (fd) { actualizarDividir(fd); return; }
+  const fdeu = e.target.closest('#f-deudas'); if (fdeu) { if (e.target.name === 'valor' && e.target.closest('.imp')?.querySelector('[name=parte]').value === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; } actualizarRevDeuda(fdeu); return; }
+  if (e.target.closest('#f-deuda') && e.target.name === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; }
   const fi = e.target.closest('#f-import');
   if (fi) { if (e.target.name === 'monto') { const v = parseMonto(e.target.value); e.target.value = v ? fmtNum(v) : ''; } actualizarImport(fi); return; }
   const f = e.target.closest('#f-mov, #f-pago'); if (!f) return;
