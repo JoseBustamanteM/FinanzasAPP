@@ -165,11 +165,22 @@ const GENERICAS = new Set(['compra', 'compras', 'cuota', 'cuotas', 'interes', 'p
 function nombreParecido(a, b) {
   const x = palabras(a), y = palabras(b);
   if (!x || !y) return false;
-  if (x === y || x.includes(y) || y.includes(x)) return true;
-  const sy = new Set(y.split(' '));
-  return x.split(' ').some(w => w.length >= 5 && !GENERICAS.has(w) && sy.has(w));
+  if (x === y || ` ${x} `.includes(` ${y} `) || ` ${y} `.includes(` ${x} `)) return true;
+  // Una palabra en común, aunque el banco la pegue a otra ("YOUTUBEPREMIUM")
+  const util = t => t.split(' ').filter(w => w.length >= 5 && !GENERICAS.has(w)), wy = util(y);
+  return util(x).some(w => wy.some(v => v === w || v.startsWith(w) || w.startsWith(v)));
 }
-const fijoIgual = (desc, tarjetaId) => pagos().find(p => esCargoTarjeta(p) && !p.cuotasTotal && mismoNombre(p.nombre, desc) && (!tarjetaId || p.tarjetaId === tarjetaId));
+// Un pago fijo se reconoce por su nombre exacto o parecido ("YouTube" ↔ "GOOGLE *YOUTUBE PREMIUM").
+// Las plataformas de cobro no cuentan como coincidencia, y si hay varios parecidos gana el de monto más cercano.
+const PLATAFORMAS = new Set(['google', 'apple', 'amazon', 'paypal', 'mercadopago', 'dlocal', 'payu', 'stripe', 'flow', 'kushki']);
+function fijoIgual(desc, tarjetaId, monto, excluir) {
+  const fijos = pagos().filter(p => esCargoTarjeta(p) && !p.cuotasTotal && (!tarjetaId || p.tarjetaId === tarjetaId) && !excluir?.has(p.id));
+  const exacto = fijos.find(p => mismoNombre(p.nombre, desc));
+  if (exacto) return exacto;
+  const sin = t => palabras(t).split(' ').filter(w => !PLATAFORMAS.has(w)).join(' ');
+  const parecidos = fijos.filter(p => sin(p.nombre) && sin(desc) && nombreParecido(sin(p.nombre), sin(desc)));
+  return parecidos.sort((a, b) => Math.abs((a.monto || 0) - (monto || 0)) - Math.abs((b.monto || 0) - (monto || 0)))[0];
+}
 // Personas y división de gastos. Lo que te deben no toca el balance hasta que llega el dinero.
 const personas = () => [...S.items.values()].filter(x => x.kind === 'per').sort((a, b) => a.nombre.localeCompare(b.nombre));
 const nombrePersona = id => { const t = id && S.items.get(id); return t && t.kind === 'per' ? t.nombre : ''; };
@@ -1026,7 +1037,8 @@ async function cargarEstado(file, password) {
       const c = pagos().find(p => !usados.has(p.id) && p.cuotasTotal === l.de && Math.abs(p.monto - l.monto) <= 50 && (mismoNombre(p.nombre, l.desc) || nombreParecido(p.nombre, l.desc) || (p.compraFecha && p.compraFecha === l.fecha)) && (!tjProbable || p.tarjetaId === tjProbable) && ultimoMesCuota(p) >= shiftMes(r.mes, -2));
       if (c) { usados.add(c.id); l.cuotaId = c.id; l.accion = 'ignorar'; l.existe = true; l.aviso = 'Ya tienes esta compra en cuotas. Se dejó sin registrar para no duplicarla.'; }
     } else if (['compra', 'cargo', 'fijo'].includes(l.accion)) {
-      const fijo = l.accion !== 'cargo' && fijoIgual(l.desc, tjProbable);
+      const fijo = l.accion !== 'cargo' && fijoIgual(l.desc, tjProbable, l.monto, usados);
+      if (fijo) usados.add(fijo.id);
       const previo = movs().find(x => esCredito(x) && !x.pagoId && !usados.has(x.id) && x.fecha === l.fecha && x.monto === l.monto && (tjProbable ? !claveTarjeta(x) || claveTarjeta(x) === tjProbable : mismoNombre(x.nota, l.desc)));
       if (previo) { usados.add(previo.id); l.era = l.accion === 'cargo' ? 'cargo' : 'compra'; l.movPrevioId = previo.id; }
       if (fijo) { l.accion = 'ignorar'; l.existe = true; l.fijoId = fijo.id; l.aviso = fijo.monto === l.monto ? 'Ya está como pago fijo de la tarjeta.' : `Ya está como pago fijo. Su valor cambiará de ${clp(fijo.monto)} a ${clp(l.monto)}.`; }
