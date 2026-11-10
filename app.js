@@ -209,14 +209,27 @@ function cargosDivididos(hasta) {
   }
   return out;
 }
+// Me deben, mes a mes: cada pago recibido queda asociado a un mes (el que se estaba viendo al registrarlo)
+const mesReembolso = x => x.reembolsoMes || (x.fecha || '').slice(0, 7);
 function cuentaPersonas(m) {
-  const cargos = cargosDivididos(m), abonos = movs().filter(x => x.reembolso && x.personaId && (x.fecha || '').slice(0, 7) <= m);
+  const cargos = cargosDivididos(m), abonos = movs().filter(x => x.reembolso && x.personaId);
   return personas().map(t => {
     const suyos = cargos.filter(c => c.personaId === t.id), pagos = abonos.filter(a => a.personaId === t.id);
-    const delMes = suyos.filter(c => c.mes === m), abonosMes = pagos.filter(a => a.fecha.slice(0, 7) === m);
-    const previo = sum(suyos.filter(c => c.mes < m)) - sum(pagos.filter(a => a.fecha.slice(0, 7) < m));
-    return { t, delMes, abonosMes, previo, total: previo + sum(delMes) - sum(abonosMes) };
+    const delMes = suyos.filter(c => c.mes === m), abonosMes = pagos.filter(a => mesReembolso(a) === m);
+    const mes = sum(delMes) - sum(abonosMes);
+    const meses = [...new Set([...suyos.map(c => c.mes), ...pagos.map(mesReembolso)])].filter(k => k < m).sort();
+    const atrasos = meses.map(k => ({ mes: k, falta: sum(suyos.filter(c => c.mes === k)) - sum(pagos.filter(a => mesReembolso(a) === k)) })).filter(x => x.falta > 0);
+    const atrasado = atrasos.reduce((a, x) => a + x.falta, 0);
+    return { t, delMes, abonosMes, mes, atrasos, atrasado, total: Math.max(0, mes) + atrasado };
   });
+}
+// Un pago de varios meses atrasados se reparte desde el más antiguo: cada mes queda con su propio movimiento
+function repartirAtrasado(rec, atrasos, campo) {
+  let resto = rec.monto; const partes = [];
+  for (const x of atrasos) { if (resto <= 0) break; const a = Math.min(resto, x.falta); partes.push({ ...rec, monto: a, [campo]: x.mes }); resto -= a; }
+  if (!partes.length) throw new Error('No hay nada atrasado');
+  partes[partes.length - 1].monto += resto;
+  return partes;
 }
 const pagoDeTarjeta = t => pagos().find(q => q.tipo === 'pago_tarjeta' && q.tarjetaId === t);
 const esCargoTarjeta = p => p.tipo === 'gasto' && p.medio === 'credito' && !!nombreTarjeta(p.tarjetaId);
@@ -773,16 +786,20 @@ function filaCompra(x) {
     <div class="pago-der"><div class="am">${clp(x.monto)}</div><button class="pago-btn sec" data-act="dividir-mov" data-id="${esc(x.id)}" aria-label="Dividir" title="Dividir">÷</button></div></div>`;
 }
 function vistaMeDeben(m) {
-  const cuentas = cuentaPersonas(m), total = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
-  const conMovimiento = cuentas.filter(c => c.total || c.delMes.length || c.abonosMes.length);
-  return `<div class="card"><div class="kpi"><div class="mut small">Me deben en total</div><div class="v ${total ? 'ok' : ''}">${clp(total)}</div></div>
+  const cuentas = cuentaPersonas(m), delMes = cuentas.reduce((a, c) => a + Math.max(0, c.mes), 0), atrasado = cuentas.reduce((a, c) => a + c.atrasado, 0);
+  const conMovimiento = cuentas.filter(c => c.delMes.length || c.abonosMes.length || c.atrasado);
+  return `<div class="card"><div class="kpis">
+      <div class="kpi"><div class="mut small">Me deben este mes</div><div class="v ${delMes ? 'ok' : ''}">${clp(delMes)}</div></div>
+      <div class="kpi"><div class="mut small">Total con meses anteriores</div><div class="v ${delMes + atrasado ? 'ok' : ''}">${clp(delMes + atrasado)}</div></div></div>
       <p class="mut small">No cuenta en tu balance hasta que registres que te pagaron. Para dividir algo, toca ÷ en una compra o una cuota.</p></div>
     <button class="btn sec" data-act="nueva-persona">+ Agregar persona</button>
-    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'ok' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
-      ${c.previo ? `<div class="bar-l small"><span>${c.previo > 0 ? 'Pendiente de meses anteriores' : 'A favor de meses anteriores'}</span><span>${clp(Math.abs(c.previo))}</span></div>` : ''}
+    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.mes > 0 ? 'ok' : ''}">${c.mes < 0 ? `A favor ${clp(-c.mes)}` : clp(c.mes)}</b></div>
       ${c.delMes.map(d => `<div class="bar-l small"><span>${esc(d.nombre)}${d.pct ? ` (${String(d.pct).replace('.', ',')}%)` : ''}</span><span>${clp(d.monto)}</span></div>`).join('')}
       ${c.abonosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💰</div><div class="tx"><b>Pago recibido</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
-      ${c.total > 0 ? `<button class="btn" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago recibido</button>` : ''}</section>`).join('') || '<div class="empty">Nadie te debe en este mes.</div>'}`;
+      ${c.mes > 0 ? `<button class="btn" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.mes}" data-mes="${m}">Registrar pago de ${mesLabel(m).toLowerCase()}</button>` : ''}
+      ${c.atrasado ? `<div class="bar-l small" style="margin-top:12px"><span class="warn">Atrasado de meses anteriores</span><span class="warn">${clp(c.atrasado)}</span></div>
+        <div class="mut small">${esc(c.atrasos.map(x => `${mesLabel(x.mes)}: ${clp(x.falta)}`).join(' · '))}</div>
+        <button class="btn sec" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.atrasado}" data-mes="antes:${m}">Registrar pago de lo atrasado</button>` : ''}</section>`).join('') || '<div class="empty">Nadie te debe en este mes.</div>'}`;
 }
 function vistaYoDebo(m) {
   const cuentas = cuentaDeudas(m), delMes = cuentas.reduce((a, c) => a + Math.max(0, c.mes), 0), atrasado = cuentas.reduce((a, c) => a + c.atrasado, 0);
@@ -1069,7 +1086,7 @@ function formHTML(r, isTpl) {
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   const pers = [...new Set(movs().map(x => x.persona).filter(Boolean))];
   const mesFact = r.factMes || (r.id && r.fecha ? r.fecha.slice(0, 7) : S.mes);
-  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" data-deuda="${r.pagoDeuda ? 1 : ''}" data-deuda-mes="${esc(r.deudaMes || '')}" autocomplete="off">
+  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" data-deuda="${r.pagoDeuda ? 1 : ''}" data-deuda-mes="${esc(r.deudaMes || r.reembolsoMes || '')}" autocomplete="off">
     <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
     ${!isTpl && !r.id && !r.pagoId ? `<label class="btn sec foto-btn">📷 Leer foto de la compra<input type="file" id="foto-mov" accept="image/*" hidden></label>
@@ -1412,17 +1429,23 @@ async function guardarForm(f) {
   if (tipo === 'gasto' && base.medio === 'credito' && f.elements.factMes) rec.factMes = g('factMes');
   if (id && S.items.get(id)?.cargo) rec.cargo = true;
   if (id && tipo === 'gasto' && S.items.get(id)?.div) rec.div = S.items.get(id).div;
-  if (f.dataset.persona && tipo === 'ingreso') { rec.personaId = f.dataset.persona; rec.reembolso = true; }
+  if (f.dataset.persona && tipo === 'ingreso') {
+    rec.personaId = f.dataset.persona; rec.reembolso = true; pagoMes = S.mes;
+    const dm = f.dataset.deudaMes || '';
+    if (dm.startsWith('antes:') && !id) {
+      const partes = repartirAtrasado(rec, cuentaPersonas(dm.slice(6)).find(c => c.t.id === rec.personaId)?.atrasos || [], 'reembolsoMes');
+      for (const x of partes) await saveRec(x);
+      closeSheet(); renderMain(); toast(`Pago recibido registrado en ${partes.length} mes${partes.length === 1 ? '' : 'es'} atrasado${partes.length === 1 ? '' : 's'}`); return;
+    }
+    rec.reembolsoMes = dm && !dm.startsWith('antes:') ? dm : S.mes;
+  }
   // Un pago de lo que debo no es un gasto nuevo: esas cuotas ya contaron en su mes
   if (f.dataset.persona && f.dataset.deuda && tipo === 'transferencia') {
     rec.personaId = f.dataset.persona; rec.pagoDeuda = true; pagoMes = S.mes;
     const dm = f.dataset.deudaMes || '';
     if (dm.startsWith('antes:') && !id) {
       // Lo atrasado se reparte desde el mes más antiguo: cada mes queda con su propio pago
-      let resto = rec.monto; const partes = [];
-      for (const x of atrasosDeuda(rec.personaId, dm.slice(6))) { if (resto <= 0) break; const a = Math.min(resto, x.falta); partes.push({ ...rec, monto: a, deudaMes: x.mes }); resto -= a; }
-      if (!partes.length) throw new Error('No hay nada atrasado que pagar');
-      partes[partes.length - 1].monto += resto;
+      const partes = repartirAtrasado(rec, atrasosDeuda(rec.personaId, dm.slice(6)), 'deudaMes');
       for (const x of partes) await saveRec(x);
       closeSheet(); renderMain(); toast(`Pago registrado en ${partes.length} mes${partes.length === 1 ? '' : 'es'} atrasado${partes.length === 1 ? '' : 's'}`); return;
     }
@@ -1494,7 +1517,7 @@ document.addEventListener('click', async e => {
         if (await confirmar('¿Eliminar persona?', 'Sus pagos recibidos se conservan como movimientos.', 'Eliminar', true)) { await delRec(el.dataset.id); closeSheet(); renderMain(); }
         break;
       }
-      case 'registrar-reembolso': abrirForm({ tipo: 'ingreso', categoria: 'Reembolso', monto: +el.dataset.monto, personaId: el.dataset.id, nota: 'Pago de ' + nombrePersona(el.dataset.id), fecha: hoy() }); break;
+      case 'registrar-reembolso': abrirForm({ tipo: 'ingreso', categoria: 'Reembolso', monto: +el.dataset.monto, personaId: el.dataset.id, reembolsoMes: el.dataset.mes, nota: 'Pago de ' + nombrePersona(el.dataset.id), fecha: hoy() }); break;
       case 'convertir-fijo': if (await confirmar('¿Convertir en pago fijo?', 'Dejará de ser una compra de una vez y aparecerá todos los meses en esta tarjeta.', 'Convertir')) await convertirEnFijo(el.dataset.id); break;
       case 'nueva-compra': abrirForm({ tipo: 'gasto', medio: 'credito' }); break;
       case 'vista-pagos': S.pagosVista = el.dataset.v; renderMain(); break;
