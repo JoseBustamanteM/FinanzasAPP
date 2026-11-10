@@ -256,20 +256,26 @@ function atrasados(m) {
 const deudas = () => [...S.items.values()].filter(x => x.kind === 'deu').sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '') || a.nombre.localeCompare(b.nombre));
 const deudasDelMes = m => deudas().filter(d => nombrePersona(d.personaId) && pagoVisible(d, m));
 const nombreDeuda = (d, m) => d.cuotasTotal > 1 ? `${d.nombre} · Cuota ${cuotaDelMes(d, m)} de ${d.cuotasTotal}` : d.nombre;
+// Cada pago queda asociado a un mes (el que se estaba viendo al pagar), igual que los pagos recurrentes
+const mesPagoDeuda = x => x.deudaMes || (x.fecha || '').slice(0, 7);
+const pagosDeuda = personaId => movs().filter(x => x.pagoDeuda && x.personaId === personaId);
+// Lo que falta pagarle a una persona en un mes: sus cuotas de ese mes menos lo pagado para ese mes
+const faltaDeudaMes = (personaId, k) => sum(deudas().filter(d => d.personaId === personaId && pagoVisible(d, k))) - sum(pagosDeuda(personaId).filter(x => mesPagoDeuda(x) === k));
+function atrasosDeuda(personaId, m) {
+  const meses = [...deudas().filter(d => d.personaId === personaId).map(d => d.desde), ...pagosDeuda(personaId).map(mesPagoDeuda)].filter(Boolean).sort();
+  const out = [];
+  for (let k = meses[0]; k && k < m; k = shiftMes(k, 1)) { const falta = faltaDeudaMes(personaId, k); if (falta > 0) out.push({ mes: k, falta }); }
+  return out;
+}
 function cuentaDeudas(m) {
-  const pagosA = movs().filter(x => x.pagoDeuda && x.personaId);
   return personas().map(t => {
-    const suyas = deudas().filter(d => d.personaId === t.id), pagos = pagosA.filter(x => x.personaId === t.id);
-    let previo = 0;
-    for (const d of suyas) {
-      const fin = shiftMes(m, -1), ultimo = ultimoMesCuota(d) < fin ? ultimoMesCuota(d) : fin;
-      if (d.desde <= ultimo) previo += d.monto * (difMes(d.desde, ultimo) + 1);
-    }
-    previo -= sum(pagos.filter(x => x.fecha.slice(0, 7) < m));
-    const delMes = suyas.filter(d => pagoVisible(d, m)), pagosMes = pagos.filter(x => x.fecha.slice(0, 7) === m);
-    return { t, delMes, pagosMes, previo, total: previo + sum(delMes) - sum(pagosMes) };
+    const delMes = deudas().filter(d => d.personaId === t.id && pagoVisible(d, m)), pagosMes = pagosDeuda(t.id).filter(x => mesPagoDeuda(x) === m);
+    const mes = sum(delMes) - sum(pagosMes), atrasos = atrasosDeuda(t.id, m), atrasado = atrasos.reduce((a, x) => a + x.falta, 0);
+    return { t, delMes, pagosMes, mes, atrasos, atrasado, total: Math.max(0, mes) + atrasado };
   });
 }
+// Para la tarjeta "Atrasado de meses anteriores"
+const atrasadosDeuda = m => cuentaDeudas(m).flatMap(c => c.atrasos.map(x => ({ p: { nombre: `Deuda con ${c.t.nombre}` }, mes: x.mes, falta: x.falta })));
 const textoAtrasados = lista => lista.slice(0, 4).map(a => `${a.p.nombre} (${mesLabel(a.mes)})`).join(', ') + (lista.length > 4 ? ` y ${lista.length - 4} más` : '');
 // Las cuotas y pagos fijos de una tarjeta son gasto del mes en que se cobran, aunque aún no se marquen
 function gastosDelMes(m) {
@@ -290,7 +296,7 @@ function porPagarDelMes(m) {
   // Las cuotas y cargos de una tarjeta ya van dentro de lo que falta pagar de esa tarjeta
   const rec = rp.pend.filter(x => !esCargoTarjeta(x.p) && (x.p.tipo !== 'pago_tarjeta' || !nombreTarjeta(x.p.tarjetaId))).reduce((a, x) => a + falta(x), 0);
   const tarj = detalleTarjetas(m).reduce((a, t) => a + Math.max(0, t.deuda), 0);
-  const cuentas = cuentaDeudas(m), yo = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
+  const cuentas = cuentaDeudas(m), yo = cuentas.reduce((a, c) => a + Math.max(0, c.mes), 0);
   const pagado = rp.pagado + cuentas.reduce((a, c) => a + sum(c.pagosMes), 0);
   return { tarj, rec, yo, total: tarj + rec + yo, pagado, variables: rp.variables };
 }
@@ -671,7 +677,7 @@ const VIEWS = {
     return html;
   },
   pagos() {
-    const r = resumenPagos(S.mes), atraso = atrasados(S.mes), vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p)), pp = porPagarDelMes(S.mes);
+    const r = resumenPagos(S.mes), atraso = [...atrasados(S.mes), ...atrasadosDeuda(S.mes)], vista = S.pagosVista || 'tarjetas', recurrentes = r.lista.filter(x => !esPagoTC(x.p)), pp = porPagarDelMes(S.mes);
     return `<div class="card"><div class="kpis">
         <div class="kpi"><div class="mut small">Por pagar${pp.variables ? ` (+${pp.variables} sin monto fijo)` : ''}</div><div class="v ${pp.total ? 'bad' : ''}">${clp(pp.total)}</div></div>
         <div class="kpi"><div class="mut small">Pagado</div><div class="v">${clp(pp.pagado)}</div></div>
@@ -779,16 +785,20 @@ function vistaMeDeben(m) {
       ${c.total > 0 ? `<button class="btn" data-act="registrar-reembolso" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago recibido</button>` : ''}</section>`).join('') || '<div class="empty">Nadie te debe en este mes.</div>'}`;
 }
 function vistaYoDebo(m) {
-  const cuentas = cuentaDeudas(m), total = cuentas.reduce((a, c) => a + Math.max(0, c.total), 0);
-  const conMovimiento = cuentas.filter(c => c.total || c.delMes.length || c.pagosMes.length);
-  return `<div class="card"><div class="kpi"><div class="mut small">Debo en total</div><div class="v ${total ? 'bad' : ''}">${clp(total)}</div></div>
-      <p class="mut small">Lo que te corresponde de la tarjeta de otra persona cuenta como gasto en el mes que se cobra. Lo que le pagas solo baja la deuda.</p></div>
+  const cuentas = cuentaDeudas(m), delMes = cuentas.reduce((a, c) => a + Math.max(0, c.mes), 0), atrasado = cuentas.reduce((a, c) => a + c.atrasado, 0);
+  const conMovimiento = cuentas.filter(c => c.delMes.length || c.pagosMes.length || c.atrasado);
+  return `<div class="card"><div class="kpis">
+      <div class="kpi"><div class="mut small">Debo este mes</div><div class="v ${delMes ? 'bad' : ''}">${clp(delMes)}</div></div>
+      <div class="kpi"><div class="mut small">Total con meses anteriores</div><div class="v ${delMes + atrasado ? 'bad' : ''}">${clp(delMes + atrasado)}</div></div></div>
+      <p class="mut small">Lo que te corresponde de la tarjeta de otra persona cuenta como gasto en el mes que se cobra. Lo que le pagas solo baja la deuda de ese mes.</p></div>
     <label class="btn" style="color:var(--on-acc)">📄 Subir estado de cuenta de otra persona<input type="file" accept="application/pdf,.pdf" id="imp-deuda" hidden></label>
-    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.total > 0 ? 'bad' : ''}">${c.total < 0 ? `A favor ${clp(-c.total)}` : clp(c.total)}</b></div>
-      ${c.previo ? `<div class="bar-l small"><span>${c.previo > 0 ? 'Pendiente de meses anteriores' : 'A favor de meses anteriores'}</span><span>${clp(Math.abs(c.previo))}</span></div>` : ''}
+    ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.mes > 0 ? 'bad' : ''}">${c.mes < 0 ? `A favor ${clp(-c.mes)}` : clp(c.mes)}</b></div>
       ${c.delMes.map(d => `<button class="row" data-act="editar-deuda" data-id="${esc(d.id)}"><div class="ic">💳</div><div class="tx"><b>${esc(nombreDeuda(d, m))}</b><span>${d.pct ? `Tu parte: ${String(d.pct).replace('.', ',')}% de ${clp(d.lineaMonto)}` : d.lineaMonto && d.lineaMonto !== d.monto ? `Tu parte de ${clp(d.lineaMonto)}` : 'Completo'}</span></div><div class="am">${clp(d.monto)}</div></button>`).join('')}
       ${c.pagosMes.map(a => `<button class="row" data-act="editar" data-id="${esc(a.id)}"><div class="ic">💸</div><div class="tx"><b>Le pagaste</b><span>${esc(a.fecha.split('-').reverse().join('/'))}</span></div><div class="am ok">-${clp(a.monto)}</div></button>`).join('')}
-      ${c.total > 0 ? `<button class="btn" data-act="pagar-deuda" data-id="${esc(c.t.id)}" data-monto="${c.total}">Registrar pago a ${esc(c.t.nombre)}</button>` : ''}</section>`).join('') || '<div class="empty">No le debes a nadie en este mes.</div>'}`;
+      ${c.mes > 0 ? `<button class="btn" data-act="pagar-deuda" data-id="${esc(c.t.id)}" data-monto="${c.mes}" data-mes="${m}">Registrar pago de ${mesLabel(m).toLowerCase()}</button>` : ''}
+      ${c.atrasado ? `<div class="bar-l small" style="margin-top:12px"><span class="bad">Atrasado de meses anteriores</span><span class="bad">${clp(c.atrasado)}</span></div>
+        <div class="mut small">${esc(c.atrasos.map(x => `${mesLabel(x.mes)}: ${clp(x.falta)}`).join(' · '))}</div>
+        <button class="btn sec" data-act="pagar-deuda" data-id="${esc(c.t.id)}" data-monto="${c.atrasado}" data-mes="antes:${m}">Pagar lo atrasado</button>` : ''}</section>`).join('') || '<div class="empty">No le debes a nadie en este mes.</div>'}`;
 }
 // Una línea del estado de cuenta ajeno que ya está registrada como deuda de esa persona
 function deudaIgual(l, personaId, mes, usados) {
@@ -1059,7 +1069,7 @@ function formHTML(r, isTpl) {
   const cats = [...new Set([...CATEGORIAS, ...movs().map(x => x.categoria).filter(Boolean)])];
   const pers = [...new Set(movs().map(x => x.persona).filter(Boolean))];
   const mesFact = r.factMes || (r.id && r.fecha ? r.fecha.slice(0, 7) : S.mes);
-  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" data-deuda="${r.pagoDeuda ? 1 : ''}" autocomplete="off">
+  return `<form id="f-mov" data-tpl="${isTpl ? 1 : 0}" data-id="${esc(r.id || '')}" data-pago-id="${esc(r.pagoId || '')}" data-pago-mes="${esc(r.pagoMes || '')}" data-persona="${esc(r.personaId || '')}" data-deuda="${r.pagoDeuda ? 1 : ''}" data-deuda-mes="${esc(r.deudaMes || '')}" autocomplete="off">
     <h2>${isTpl ? (r.id ? 'Editar atajo' : 'Nuevo atajo') : (r.id ? 'Editar movimiento' : r.pagoId ? 'Registrar pago' : 'Nuevo movimiento')}</h2>
     ${isTpl ? `<label>Nombre del atajo<input name="nombre" required maxlength="40" value="${esc(r.nombre || '')}" placeholder="Ej: Bencina, Plata a Juan"></label>` : ''}
     ${!isTpl && !r.id && !r.pagoId ? `<label class="btn sec foto-btn">📷 Leer foto de la compra<input type="file" id="foto-mov" accept="image/*" hidden></label>
@@ -1404,7 +1414,20 @@ async function guardarForm(f) {
   if (id && tipo === 'gasto' && S.items.get(id)?.div) rec.div = S.items.get(id).div;
   if (f.dataset.persona && tipo === 'ingreso') { rec.personaId = f.dataset.persona; rec.reembolso = true; }
   // Un pago de lo que debo no es un gasto nuevo: esas cuotas ya contaron en su mes
-  if (f.dataset.persona && f.dataset.deuda && tipo === 'transferencia') { rec.personaId = f.dataset.persona; rec.pagoDeuda = true; }
+  if (f.dataset.persona && f.dataset.deuda && tipo === 'transferencia') {
+    rec.personaId = f.dataset.persona; rec.pagoDeuda = true; pagoMes = S.mes;
+    const dm = f.dataset.deudaMes || '';
+    if (dm.startsWith('antes:') && !id) {
+      // Lo atrasado se reparte desde el mes más antiguo: cada mes queda con su propio pago
+      let resto = rec.monto; const partes = [];
+      for (const x of atrasosDeuda(rec.personaId, dm.slice(6))) { if (resto <= 0) break; const a = Math.min(resto, x.falta); partes.push({ ...rec, monto: a, deudaMes: x.mes }); resto -= a; }
+      if (!partes.length) throw new Error('No hay nada atrasado que pagar');
+      partes[partes.length - 1].monto += resto;
+      for (const x of partes) await saveRec(x);
+      closeSheet(); renderMain(); toast(`Pago registrado en ${partes.length} mes${partes.length === 1 ? '' : 'es'} atrasado${partes.length === 1 ? '' : 's'}`); return;
+    }
+    rec.deudaMes = dm && !dm.startsWith('antes:') ? dm : S.mes;
+  }
   const nCuotas = !id && !rec.pagoId && tipo === 'gasto' && base.medio === 'credito' ? parseMonto(g('cuotas')) : 0;
   if (nCuotas > 1) {
     if (nCuotas > 72) throw new Error('Revisa el número de cuotas');
@@ -1492,7 +1515,7 @@ document.addEventListener('click', async e => {
         }
         break;
       }
-      case 'pagar-deuda': abrirForm({ tipo: 'transferencia', monto: +el.dataset.monto, persona: nombrePersona(el.dataset.id), personaId: el.dataset.id, pagoDeuda: true, nota: 'Pago de lo que le debo', fecha: hoy() }); break;
+      case 'pagar-deuda': abrirForm({ tipo: 'transferencia', monto: +el.dataset.monto, persona: nombrePersona(el.dataset.id), personaId: el.dataset.id, pagoDeuda: true, deudaMes: el.dataset.mes, nota: el.dataset.mes.startsWith('antes:') ? 'Pago de lo atrasado que le debo' : 'Pago de lo que le debo', fecha: hoy() }); break;
       case 'nueva-tarjeta': abrirTarjetaForm(); break;
       case 'editar-tarjeta': abrirTarjetaForm(S.items.get(el.dataset.id)); break;
       case 'borrar-tarjeta': if (await confirmar('¿Eliminar tarjeta?', 'Sus compras y pagos se conservan, pero quedan como "Sin tarjeta asignada".', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
