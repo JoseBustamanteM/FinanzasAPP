@@ -634,19 +634,23 @@ const VIEWS = {
     const detalle = detalleTarjetas(S.mes), deuda = detalle.reduce((a, t) => a + Math.max(0, t.deuda), 0);
     const atraso = atrasados(S.mes).filter(a => a.p.tipo === 'pago_tarjeta' || esCargoTarjeta(a.p));
     const rp = resumenPagos(S.mes);
-    const R = sum(reembolsos), bal = I + R - G - T;
+    // Lo que te deben de los gastos del mes no es gasto tuyo: suma al balance de ese mes, te lo hayan pagado o no.
+    // Los pagos recibidos no se suman aparte, para no contarlos dos veces.
+    const cp = cuentaPersonas(S.mes), MD = cp.reduce((a, c) => a + sum(c.delMes), 0), MDpend = cp.reduce((a, c) => a + Math.max(0, c.mes), 0);
+    const R = sum(reembolsos), bal = I + MD - G - T;
     const ben = gastos.filter(x => isBencina(x.categoria));
     const litros = ben.reduce((a, x) => a + (+x.litros || 0), 0);
     const rend = rendimientos();
     const ts = tpls();
     return `
       <div class="card"><div class="kpis">
-        <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div>${GP + TP ? `<div class="mut small">Ya descuenta ${clp(GP + TP)} de pagos que aún no marcas</div>` : ''}</div>
+        <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div>${GP + TP ? `<div class="mut small">Ya descuenta ${clp(GP + TP)} de pagos que aún no marcas</div>` : ''}${MD ? `<div class="mut small">Suma ${clp(MD)} que te deben de gastos de este mes</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Gastos</div><div class="v">${clp(G)}</div>${GP ? `<div class="mut small">${clp(GP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Ingresos</div><div class="v">${clp(I)}</div></div>
         <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div>${TP ? `<div class="mut small">${clp(TP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Movimientos</div><div class="v">${ms.length}</div></div>
-        ${R ? `<div class="kpi wide"><div class="mut small">Reembolsos recibidos</div><div class="v">${clp(R)}</div></div>` : ''}
+        ${MD ? `<div class="kpi wide"><div class="mut small">Me deben este mes</div><div class="v ok">${clp(MD)}</div><div class="mut small">${MDpend ? `${clp(MDpend)} aún por recibir` : 'Ya te pagaron todo'}</div></div>` : ''}
+        ${R ? `<div class="kpi wide"><div class="mut small">Pagos recibidos este mes</div><div class="v">${clp(R)}</div><div class="mut small">Ya están dentro de lo que te deben, no se suman de nuevo</div></div>` : ''}
         <div class="kpi wide"><div class="mut small">Falta pagar este mes</div><div class="v ${pp.total ? 'bad' : 'ok'}">${clp(pp.total)}</div>
           <div class="mut small">${[pp.tarj && `Tarjetas ${clp(pp.tarj)}`, pp.rec && `Recurrentes ${clp(pp.rec)}`, pp.yo && `Yo debo ${clp(pp.yo)}`].filter(Boolean).join(' · ') || 'Todo pagado'}${pp.variables ? ` · ${pp.variables} sin monto fijo` : ''}</div></div>
       </div></div>
@@ -791,7 +795,7 @@ function vistaMeDeben(m) {
   return `<div class="card"><div class="kpis">
       <div class="kpi"><div class="mut small">Me deben este mes</div><div class="v ${delMes ? 'ok' : ''}">${clp(delMes)}</div></div>
       <div class="kpi"><div class="mut small">Total con meses anteriores</div><div class="v ${delMes + atrasado ? 'ok' : ''}">${clp(delMes + atrasado)}</div></div></div>
-      <p class="mut small">No cuenta en tu balance hasta que registres que te pagaron. Para dividir algo, toca ÷ en una compra o una cuota.</p></div>
+      <p class="mut small">Lo que te deben de los gastos de cada mes ya suma a tu balance de ese mes, aunque aún no te paguen. Para dividir algo, toca ÷ en una compra o una cuota.</p></div>
     <button class="btn sec" data-act="nueva-persona">+ Agregar persona</button>
     ${conMovimiento.map(c => `<section class="bloque persona"><div class="bar-l"><b>${esc(c.t.nombre)}</b><b class="${c.mes > 0 ? 'ok' : ''}">${c.mes < 0 ? `A favor ${clp(-c.mes)}` : clp(c.mes)}</b></div>
       ${c.delMes.map(d => `<div class="bar-l small"><span>${esc(d.nombre)}${d.pct ? ` (${String(d.pct).replace('.', ',')}%)` : ''}</span><span>${clp(d.monto)}</span></div>`).join('')}
