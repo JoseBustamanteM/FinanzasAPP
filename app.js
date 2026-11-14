@@ -1061,8 +1061,28 @@ function filaPago({ p, mov }, m) {
       ${partesDe(p, m).length ? `<span class="ok">${esc(textoDiv(partesDe(p, m), totalDivPago(p, m)))}</span>` : ''}</div></button>
     <div class="pago-der"><div class="am">${monto ? clp(monto) : 'Variable'}</div>
       <div class="pago-acc">${p.tipo === 'pago_tarjeta' ? '' : `<button class="pago-btn sec" data-act="dividir-pago" data-id="${esc(p.id)}" aria-label="Dividir" title="Dividir">÷</button>`}
-      ${mov && !saldo ? `<button class="pago-btn hecho" data-act="editar" data-id="${esc(mov.id)}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div></div>
+      ${mov && saldo ? `<button class="pago-btn sec" data-act="ver-pagado" data-id="${esc(p.id)}" data-mes="${m}" aria-label="Ver pagos" title="Ver pagos">✓</button>` : ''}
+      ${mov && !saldo ? `<button class="pago-btn hecho" data-act="ver-pagado" data-id="${esc(p.id)}" data-mes="${m}">✓ Pagado</button>` : `<button class="pago-btn ${enTarjeta(p) ? 'sec' : ''}" data-act="pagar" data-id="${esc(p.id)}">${enTarjeta(p) ? 'Marcar' : 'Pagar'}</button>`}</div></div>
   </div>`;
+}
+// Los pagos registrados de un pago en un mes, con la opción de quitarle el estado de pagado
+function abrirPagado(id, m) {
+  const p = S.items.get(id); if (!p) return;
+  const ms = movs().filter(x => x.pagoId === id && x.pagoMes === m).sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
+  const hijas = ms.reduce((a, x) => a + movs().filter(h => h.porPago === x.id).length, 0);
+  openSheet(`<h2>${esc(p.nombre)}</h2><p class="mut small">${esc(mesLabel(m))}${p.cuotasTotal ? ` · Cuota ${cuotaDelMes(p, m)} de ${p.cuotasTotal}` : ''}</p>
+    ${ms.map(x => `<button class="row" data-act="editar" data-id="${esc(x.id)}"><div class="ic">✓</div><div class="tx"><b>Pagado el ${esc(x.fecha.split('-').reverse().join('/'))}</b>
+      <span>${x.porPago ? 'Se marcó sola al pagar el total de la tarjeta' : 'Toca para editar el pago'}</span></div><div class="am">${clp(x.monto)}</div></button>`).join('')}
+    <button class="btn danger" data-act="quitar-pagado" data-id="${esc(id)}" data-mes="${m}">Quitar pagado</button>
+    <p class="mut small">${ms.length > 1 ? `Se eliminan los ${ms.length} pagos de este mes` : 'Se elimina el pago registrado'}${hijas === 1 ? ' y se desmarca 1 cuota que se marcó sola con él' : hijas ? ` y se desmarcan ${hijas} cuotas que se marcaron solas con él` : ''}. Vuelve a quedar pendiente y puedes deshacerlo.</p>
+    <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cerrar</button></div>`);
+}
+async function quitarPagado(id, m) {
+  const ms = movs().filter(x => x.pagoId === id && x.pagoMes === m), borrados = [];
+  for (const x of ms) if (S.items.has(x.id)) borrados.push(...await eliminarConCuotas(x));
+  closeSheet(); renderMain();
+  toast(borrados.length > ms.length ? `Pago quitado y ${borrados.length - ms.length} cuota${borrados.length - ms.length === 1 ? '' : 's'} sin marcar` : 'Pago quitado: vuelve a quedar pendiente',
+    { label: 'Deshacer', fn: async () => { for (const x of borrados) await saveRec(x); renderMain(); } }, 6000);
 }
 function rowHTML(m) {
   const titulo = m.tipo === 'transferencia' ? (m.persona || 'Transferencia') : m.tipo === 'pago_tarjeta' ? 'Pago tarjeta' : (m.categoria || TIPOS[m.tipo]);
@@ -1116,7 +1136,7 @@ function formHTML(r, isTpl) {
     <div class="acts"><button type="button" class="btn sec" data-act="cerrar">Cancelar</button><button class="btn">Guardar</button></div>
     ${!isTpl && r.id && r.tipo === 'gasto' && !r.pagoId ? `<button type="button" class="btn sec" data-act="dividir-mov" data-id="${esc(r.id)}">÷ Dividir con otra persona</button>` : ''}
     ${!isTpl && r.id && esCredito(r) && !r.pagoId ? `<button type="button" class="btn sec" data-act="convertir-fijo" data-id="${esc(r.id)}">Convertir en pago fijo mensual</button>` : ''}
-    ${r.id ? `<button type="button" class="btn danger" data-act="${isTpl ? 'borrar-atajo' : 'borrar-mov'}" data-id="${esc(r.id)}">Eliminar</button>` : ''}
+    ${r.id ? `<button type="button" class="btn danger" data-act="${isTpl ? 'borrar-atajo' : 'borrar-mov'}" data-id="${esc(r.id)}">${!isTpl && (r.pagoId || r.pagoDeuda || r.reembolso) ? 'Quitar pagado (eliminar este pago)' : 'Eliminar'}</button>` : ''}
     <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <datalist id="dl-per">${pers.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
   </form>`;
@@ -1549,6 +1569,8 @@ document.addEventListener('click', async e => {
       case 'nuevo-pago': abrirPagoForm(); break;
       case 'editar-pago': abrirPagoForm(S.items.get(el.dataset.id)); break;
       case 'pagar': await pagarPago(el.dataset.id); break;
+      case 'ver-pagado': abrirPagado(el.dataset.id, el.dataset.mes); break;
+      case 'quitar-pagado': await quitarPagado(el.dataset.id, el.dataset.mes); break;
       case 'borrar-pago': if (await confirmar('¿Eliminar pago recurrente?', 'Los movimientos ya registrados no se borran.', 'Eliminar', true)) { await delRec(el.dataset.id); renderMain(); } break;
       case 'borrar-mov': {
         const m = S.items.get(el.dataset.id); closeSheet(); const borrados = await eliminarConCuotas(m); renderMain();
