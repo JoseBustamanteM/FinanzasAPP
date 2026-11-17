@@ -292,7 +292,10 @@ const atrasadosDeuda = m => cuentaDeudas(m).flatMap(c => c.atrasos.map(x => ({ p
 const textoAtrasados = lista => lista.slice(0, 4).map(a => `${a.p.nombre} (${mesLabel(a.mes)})`).join(', ') + (lista.length > 4 ? ` y ${lista.length - 4} más` : '');
 // Las cuotas y pagos fijos de una tarjeta son gasto del mes en que se cobran, aunque aún no se marquen
 function gastosDelMes(m) {
-  const propios = delMes(m).filter(x => x.tipo === 'gasto' && !(x.pagoId && esCargoTarjeta(S.items.get(x.pagoId) || {})));
+  // Una compra con crédito es gasto del mes en que se cobra (el de su estado de cuenta), igual que sus cuotas
+  // y que lo que otros te deben de ella. Lo demás, del mes en que ocurre.
+  const mesGasto = x => (esCredito(x) ? mesDePagoCompra(x) : (x.fecha || '').slice(0, 7));
+  const propios = movs().filter(x => x.tipo === 'gasto' && mesGasto(x) === m && !(x.pagoId && esCargoTarjeta(S.items.get(x.pagoId) || {})));
   const cargos = pagos().filter(p => esCargoTarjeta(p) && pagoVisible(p, m)).map(p => ({ tipo: 'gasto', medio: 'credito', categoria: p.categoria, tarjetaId: p.tarjetaId, monto: pagoMov(p, m)?.monto || p.monto }));
   const deben = deudasDelMes(m).map(d => ({ tipo: 'gasto', medio: 'deuda', categoria: d.categoria || 'Deudas', monto: d.monto }));
   return [...propios, ...cargos, ...deben];
@@ -669,7 +672,7 @@ const VIEWS = {
         ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
       </div>${detalle.map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
         <div class="mut small">Compras y cuotas ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
-      <p class="mut small">Las compras con crédito cuentan como gasto el día que compras; las cuotas y pagos fijos, en el mes que se cobran. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
+      <p class="mut small">Todo lo de la tarjeta (compras, cuotas, cargos y pagos fijos) cuenta como gasto del mes en que se cobra. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
       ${gastos.length ? `<div class="card"><h3>Gastos por categoría</h3>${bars(group(gastos, x => x.categoria || 'Otros'), G)}</div>` : ''}
       ${GP ? `<p class="mut small" style="margin:-4px 4px 12px">Los gastos incluyen los pagos recurrentes del mes aunque aún no los marques como pagados.</p>` : ''}
       ${transf.length ? `<div class="card"><h3>Transferencias por persona</h3>${bars(group(transf, x => x.persona || 'Sin nombre'), T)}</div>` : ''}
