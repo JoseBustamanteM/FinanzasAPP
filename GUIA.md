@@ -66,6 +66,7 @@ En los demás dispositivos, cada vez que la persona inicia sesión: correo, cont
 ## Uso diario
 
 - **+** registra un movimiento: gasto, ingreso, transferencia o pago de tarjeta.
+- **Balance y "Te queda":** el *Balance del mes* compara tus ingresos (más lo que te deben) con lo que gastaste ese mes. *Te queda después de pagar todo lo del mes* usa en cambio todo lo que pagas en el mes, incluido lo que tus tarjetas arrastran de meses anteriores si no pagaste el total.
 - **Atajos:** lo que repites queda a un toque. Si el atajo tiene monto fijo, se registra al instante y se puede deshacer.
 - **Pagos:** en *Tarjetas* ves cada tarjeta de crédito con sus cuotas, compras y cargos del mes; en *Recurrentes*, lo que pagas sin tarjeta (arriendo, cuentas). Agrega cada pago con su día de vencimiento y, si tiene fin, sus cuotas. Las compras con débito siguen en *Movimientos*, donde puedes filtrar por medio de pago.
 - **Compras en cuotas:** en **+ → Gasto → Crédito** escribe el número de cuotas y, si tiene interés, el valor de cada una. Queda en *Pagos → Tarjetas* y la cuota avanza sola cada mes.

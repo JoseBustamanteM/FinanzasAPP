@@ -316,6 +316,16 @@ function porPagarDelMes(m) {
   const pagado = rp.pagado + cuentas.reduce((a, c) => a + sum(c.pagosMes), 0);
   return { tarj, rec, yo, total: tarj + rec + yo, pagado, variables: rp.variables };
 }
+// Toda la plata que sale en el mes, pagada o por pagar: gastos sin tarjeta, transferencias, el total de cada
+// tarjeta (con lo que arrastra de meses anteriores) y lo que le debo a otras personas
+function salidasDelMes(m) {
+  const pp = porPagarDelMes(m), ms = movs();
+  const sinTarjeta = ms.filter(x => x.tipo === 'gasto' && !esCredito(x) && (x.fecha || '').slice(0, 7) === m);
+  const transf = ms.filter(x => x.tipo === 'transferencia' && !x.pagoDeuda && (x.fecha || '').slice(0, 7) === m);
+  const pagosTarjeta = ms.filter(x => x.tipo === 'pago_tarjeta' && (x.pagoMes || (x.fecha || '').slice(0, 7)) === m);
+  const pagosDeudas = ms.filter(x => x.pagoDeuda && mesPagoDeuda(x) === m);
+  return sum(sinTarjeta) + sum(transf) + sum(pagosTarjeta) + sum(pagosDeudas) + pp.total;
+}
 // Pagos recurrentes sin tarjeta que aún no se pagan: ya son gasto del mes, aunque falte marcarlos
 const pendientesRecurrentes = m => resumenPagos(m).pend.filter(x => x.p.tipo !== 'pago_tarjeta' && !esCargoTarjeta(x.p) && !x.mov && montoPago(x.p, m))
   .map(x => ({ tipo: x.p.tipo, categoria: x.p.categoria || (x.p.tipo === 'gasto' ? 'Cuentas' : ''), persona: x.p.persona, monto: montoPago(x.p, m), pendiente: true }));
@@ -641,6 +651,8 @@ const VIEWS = {
     // Los pagos recibidos no se suman aparte, para no contarlos dos veces.
     const cp = cuentaPersonas(S.mes), MD = cp.reduce((a, c) => a + sum(c.delMes), 0), MDpend = cp.reduce((a, c) => a + Math.max(0, c.mes), 0);
     const R = sum(reembolsos), bal = I + MD - G - T;
+    // Lo que queda después de pagar todo lo del mes: aquí sí cuenta lo que las tarjetas arrastran de meses anteriores
+    const queda = I + MD - salidasDelMes(S.mes);
     const ben = gastos.filter(x => isBencina(x.categoria));
     const litros = ben.reduce((a, x) => a + (+x.litros || 0), 0);
     const rend = rendimientos();
@@ -648,6 +660,8 @@ const VIEWS = {
     return `
       <div class="card"><div class="kpis">
         <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div>${GP + TP ? `<div class="mut small">Ya descuenta ${clp(GP + TP)} de pagos que aún no marcas</div>` : ''}${MD ? `<div class="mut small">Suma ${clp(MD)} que te deben de gastos de este mes</div>` : ''}</div>
+        <div class="kpi wide"><div class="mut small">Te queda después de pagar todo lo del mes</div><div class="v ${queda < 0 ? 'bad' : 'ok'}">${clp(queda)}</div>
+          <div class="mut small">Ingresos + lo que te deben − todo lo que pagas este mes${queda !== bal ? `. Difiere del balance en ${clp(Math.abs(bal - queda))}: ${queda < bal ? 'tus tarjetas cobran saldos de meses anteriores' : 'pagaste menos de lo que gastaste'}` : ''}.</div></div>
         <div class="kpi"><div class="mut small">Gastos</div><div class="v">${clp(G)}</div>${GP ? `<div class="mut small">${clp(GP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Ingresos</div><div class="v">${clp(I)}</div></div>
         <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div>${TP ? `<div class="mut small">${clp(TP)} por pagar</div>` : ''}</div>
