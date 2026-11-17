@@ -298,7 +298,15 @@ function gastosDelMes(m) {
   const propios = movs().filter(x => x.tipo === 'gasto' && mesGasto(x) === m && !(x.pagoId && esCargoTarjeta(S.items.get(x.pagoId) || {})));
   const cargos = pagos().filter(p => esCargoTarjeta(p) && pagoVisible(p, m)).map(p => ({ tipo: 'gasto', medio: 'credito', categoria: p.categoria, tarjetaId: p.tarjetaId, monto: pagoMov(p, m)?.monto || p.monto }));
   const deben = deudasDelMes(m).map(d => ({ tipo: 'gasto', medio: 'deuda', categoria: d.categoria || 'Deudas', monto: d.monto }));
-  return [...propios, ...cargos, ...deben];
+  // Con estado de cuenta importado, la tarjeta cuenta por su total facturado: la diferencia con sus compras y cuotas
+  // (saldo que quedó de meses anteriores, intereses, abonos) entra como un ajuste
+  const ajustes = tarjetas().map(t => {
+    const total = pagoDeTarjeta(t.id)?.estados?.[m]?.total;
+    if (!total) return null;
+    const dif = total - sum([...propios, ...cargos].filter(x => esCredito(x) && x.tarjetaId === t.id));
+    return dif ? { tipo: 'gasto', medio: 'credito', tarjetaId: t.id, categoria: 'Saldo anterior y ajustes', monto: dif, ajuste: true } : null;
+  }).filter(Boolean);
+  return [...propios, ...cargos, ...deben, ...ajustes];
 }
 function resumenPagos(m) {
   const lista = pagos().map(p => ({ p, mov: pagoMov(p, m) })).filter(x => x.mov || pagoVisible(x.p, m));
@@ -660,8 +668,8 @@ const VIEWS = {
     return `
       <div class="card"><div class="kpis">
         <div class="kpi wide"><div class="mut small">Balance del mes</div><div class="v big ${bal < 0 ? 'bad' : 'ok'}">${clp(bal)}</div>${GP + TP ? `<div class="mut small">Ya descuenta ${clp(GP + TP)} de pagos que aún no marcas</div>` : ''}${MD ? `<div class="mut small">Suma ${clp(MD)} que te deben de gastos de este mes</div>` : ''}</div>
-        <div class="kpi wide"><div class="mut small">Te queda después de pagar todo lo del mes</div><div class="v ${queda < 0 ? 'bad' : 'ok'}">${clp(queda)}</div>
-          <div class="mut small">Ingresos + lo que te deben − todo lo que pagas este mes${queda !== bal ? `. Difiere del balance en ${clp(Math.abs(bal - queda))}: ${queda < bal ? 'tus tarjetas cobran saldos de meses anteriores' : 'pagaste menos de lo que gastaste'}` : ''}.</div></div>
+        ${queda !== bal ? `<div class="kpi wide"><div class="mut small">Te queda después de pagar todo lo del mes</div><div class="v ${queda < 0 ? 'bad' : 'ok'}">${clp(queda)}</div>
+          <div class="mut small">Ingresos + lo que te deben − todo lo que pagas este mes. Difiere del balance en ${clp(Math.abs(bal - queda))} porque ${queda < bal ? 'pagas más de lo que gastaste este mes' : 'pagas menos de lo que gastaste este mes'}.</div></div>` : ''}
         <div class="kpi"><div class="mut small">Gastos</div><div class="v">${clp(G)}</div>${GP ? `<div class="mut small">${clp(GP)} por pagar</div>` : ''}</div>
         <div class="kpi"><div class="mut small">Ingresos</div><div class="v">${clp(I)}</div></div>
         <div class="kpi"><div class="mut small">Transferencias</div><div class="v">${clp(T)}</div>${TP ? `<div class="mut small">${clp(TP)} por pagar</div>` : ''}</div>
@@ -686,7 +694,7 @@ const VIEWS = {
         ${atraso.length ? `<div class="kpi wide"><div class="mut small">Atrasado de meses anteriores</div><div class="v bad">${clp(atraso.reduce((a, x) => a + x.falta, 0))}</div><div class="mut small">${esc(textoAtrasados(atraso))}</div></div>` : ''}
       </div>${detalle.map(t => `<div class="tarj"><div class="bar-l"><b>${esc(t.nombre)}</b><span class="${t.deuda > 0 ? 'bad' : ''}">${clp(t.deuda)}</span></div>
         <div class="mut small">Compras y cuotas ${clp(t.compras)} · Pagado ${clp(t.pagado)}</div></div>`).join('')}
-      <p class="mut small">Todo lo de la tarjeta (compras, cuotas, cargos y pagos fijos) cuenta como gasto del mes en que se cobra. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
+      <p class="mut small">Todo lo de la tarjeta cuenta como gasto del mes en que se cobra. Si importaste su estado de cuenta, cuenta por el total facturado, incluido lo que quedó de meses anteriores. El pago de la tarjeta no se vuelve a contar como gasto.</p></div>
       ${gastos.length ? `<div class="card"><h3>Gastos por categoría</h3>${bars(group(gastos, x => x.categoria || 'Otros'), G)}</div>` : ''}
       ${GP ? `<p class="mut small" style="margin:-4px 4px 12px">Los gastos incluyen los pagos recurrentes del mes aunque aún no los marques como pagados.</p>` : ''}
       ${transf.length ? `<div class="card"><h3>Transferencias por persona</h3>${bars(group(transf, x => x.persona || 'Sin nombre'), T)}</div>` : ''}
